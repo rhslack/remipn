@@ -1,12 +1,10 @@
 use crate::app::{App, Screen};
 use ratatui::{
+    Frame,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{
-        Block, Borders, Cell, List, ListItem, Paragraph, Row, Table, Wrap,
-    },
-    Frame,
+    widgets::{Block, Borders, Cell, List, ListItem, Paragraph, Row, Table, Wrap},
 };
 
 pub fn draw(f: &mut Frame, app: &App) {
@@ -27,17 +25,25 @@ fn draw_main_screen(f: &mut Frame, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),  // Title
-            Constraint::Min(10),    // Main content
-            Constraint::Length(3),  // Status bar
+            Constraint::Length(3), // Title
+            Constraint::Min(10),   // Main content
+            Constraint::Length(3), // Status bar
         ])
         .split(f.size());
 
     // Title
     let title = Paragraph::new("RemiPN")
-        .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+        .style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )
         .alignment(Alignment::Center)
-        .block(Block::default().borders(Borders::ALL).border_type(ratatui::widgets::BorderType::Rounded));
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(ratatui::widgets::BorderType::Rounded),
+        );
     f.render_widget(title, chunks[0]);
 
     // Main content area
@@ -112,20 +118,56 @@ fn draw_vpn_list(f: &mut Frame, app: &App, area: Rect) {
                 Cell::from(profile.name.clone()),
                 Cell::from(alias),
                 Cell::from(profile.category.clone()),
-                Cell::from(Span::styled(status.as_str().to_owned(), Style::default().fg(status_color))),
+                Cell::from(Span::styled(
+                    status.as_str().to_owned(),
+                    Style::default().fg(status_color),
+                )),
                 Cell::from(connected_time),
                 Cell::from(ip_addr),
             ])
         })
         .collect();
-    let header_name = format!("Profile {}", if app.sort_column == crate::app::SortColumn::Name { if app.sort_direction == crate::app::SortDirection::Asc { "▲" } else { "▼" } } else { "" });
-    let header_category = format!("Category {}", if app.sort_column == crate::app::SortColumn::Category { if app.sort_direction == crate::app::SortDirection::Asc { "▲" } else { "▼" } } else { "" });
-    let header_status = format!("Status {}", if app.sort_column == crate::app::SortColumn::Status { if app.sort_direction == crate::app::SortDirection::Asc { "▲" } else { "▼" } } else { "" });
+    let header_name = format!(
+        "Profile {}",
+        if app.sort_column == crate::app::SortColumn::Name {
+            if app.sort_direction == crate::app::SortDirection::Asc {
+                "▲"
+            } else {
+                "▼"
+            }
+        } else {
+            ""
+        }
+    );
+    let header_category = format!(
+        "Category {}",
+        if app.sort_column == crate::app::SortColumn::Category {
+            if app.sort_direction == crate::app::SortDirection::Asc {
+                "▲"
+            } else {
+                "▼"
+            }
+        } else {
+            ""
+        }
+    );
+    let header_status = format!(
+        "Status {}",
+        if app.sort_column == crate::app::SortColumn::Status {
+            if app.sort_direction == crate::app::SortDirection::Asc {
+                "▲"
+            } else {
+                "▼"
+            }
+        } else {
+            ""
+        }
+    );
 
     let table = Table::new(
         rows,
         [
-            Constraint::Min(25),   // Profile Name
+            Constraint::Min(25),    // Profile Name
             Constraint::Length(15), // Alias
             Constraint::Length(15), // Category
             Constraint::Length(15), // Status
@@ -133,26 +175,34 @@ fn draw_vpn_list(f: &mut Frame, app: &App, area: Rect) {
             Constraint::Min(20),    // IP Address
         ],
     )
-        .header(
-            Row::new(vec![
-                header_name, 
-                "Alias".to_string(),
-                header_category, 
-                header_status, 
-                "Duration".to_string(), 
-                "IP Address".to_string()
-            ])
-                .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
-                .bottom_margin(1),
+    .header(
+        Row::new(vec![
+            header_name,
+            "Alias".to_string(),
+            header_category,
+            header_status,
+            "Duration".to_string(),
+            "IP Address".to_string(),
+        ])
+        .style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
         )
-        .highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD))
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(ratatui::widgets::BorderType::Rounded)
-                .title(" VPN Connections (↑/↓: select, Enter: toggle, /: search, s: sort, i: import) "),
-        )
-        .column_spacing(1);
+        .bottom_margin(1),
+    )
+    .highlight_style(
+        Style::default()
+            .bg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD),
+    )
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(ratatui::widgets::BorderType::Rounded)
+            .title(" VPN Connections (↑/↓: select, Enter: toggle, /: search, s: sort, i: import) "),
+    )
+    .column_spacing(1);
 
     f.render_stateful_widget(table, area, &mut app.table_state.clone());
 }
@@ -208,7 +258,11 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
 
     let status = Paragraph::new(status_line)
         .style(Style::default().fg(Color::White))
-        .block(Block::default().borders(Borders::ALL).border_type(ratatui::widgets::BorderType::Rounded));
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(ratatui::widgets::BorderType::Rounded),
+        );
 
     f.render_widget(status, area);
 }
@@ -230,9 +284,17 @@ fn draw_add_profile_screen(f: &mut Frame, app: &App) {
         ])
         .split(f.size());
 
-    let title_text = if app.screen == Screen::EditProfile { "Edit VPN Profile" } else { "Add New VPN Profile" };
+    let title_text = if app.screen == Screen::EditProfile {
+        "Edit VPN Profile"
+    } else {
+        "Add New VPN Profile"
+    };
     let title = Paragraph::new(title_text)
-        .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+        .style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
         .alignment(Alignment::Center)
         .block(Block::default().borders(Borders::ALL));
     f.render_widget(title, chunks[0]);
@@ -243,16 +305,18 @@ fn draw_add_profile_screen(f: &mut Frame, app: &App) {
         ("Category (e.g. dev, uat, prod)", 2),
         ("Certificate Path (optional)", 3),
         ("Username (optional)", 4),
-        ("Aliases (comma-separated)", 5)
+        ("Aliases (comma-separated)", 5),
     ];
 
     for (i, (label, field_idx)) in fields.iter().enumerate() {
         let is_selected = app.input_field == *field_idx;
         let is_edit = app.screen == Screen::EditProfile;
         let is_name_field = *field_idx == 0;
-        
+
         let style = if is_selected {
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
         } else if is_edit && is_name_field {
             Style::default().fg(Color::DarkGray)
         } else {
@@ -271,12 +335,13 @@ fn draw_add_profile_screen(f: &mut Frame, app: &App) {
             .style(style)
             .block(Block::default().borders(Borders::ALL));
 
-        f.render_widget(para, chunks[i+1]);
+        f.render_widget(para, chunks[i + 1]);
     }
 
-    let help = Paragraph::new("Tab: next field | Shift+Tab: prev field | Enter: save | Esc: cancel")
-        .style(Style::default().fg(Color::Gray))
-        .alignment(Alignment::Center);
+    let help =
+        Paragraph::new("Tab: next field | Shift+Tab: prev field | Enter: save | Esc: cancel")
+            .style(Style::default().fg(Color::Gray))
+            .alignment(Alignment::Center);
     f.render_widget(help, chunks[7]);
 }
 
@@ -333,7 +398,11 @@ fn draw_file_browser_screen(f: &mut Frame, app: &App) {
 
     let path_para = Paragraph::new(format!(" Path: {}", browser.current_dir.display()))
         .style(Style::default().fg(Color::Cyan))
-        .block(Block::default().borders(Borders::ALL).title(" File Browser "));
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" File Browser "),
+        );
     f.render_widget(path_para, chunks[0]);
 
     let items: Vec<ListItem> = browser
@@ -347,8 +416,12 @@ fn draw_file_browser_screen(f: &mut Frame, app: &App) {
 
     let list = List::new(items)
         .block(Block::default().borders(Borders::LEFT | Borders::RIGHT))
-        .highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD));
-    
+        .highlight_style(
+            Style::default()
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        );
+
     f.render_stateful_widget(list, chunks[1], &mut browser.state.clone());
 
     let help = Paragraph::new(" ↑/↓: Select | Enter: Open/Select | Backspace: Up | Esc: Cancel ")
@@ -362,12 +435,16 @@ fn draw_help_screen(f: &mut Frame) {
     let help_text = vec![
         Line::from(vec![Span::styled(
             "RemiPN - Help",
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
         )]),
         Line::from(""),
         Line::from(vec![Span::styled(
             "Navigation:",
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
         )]),
         Line::from("  ↑/k         - Move selection up"),
         Line::from("  ↓/j         - Move selection down"),
@@ -377,7 +454,9 @@ fn draw_help_screen(f: &mut Frame) {
         Line::from(""),
         Line::from(vec![Span::styled(
             "Actions:",
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
         )]),
         Line::from("  Enter/Space - Connect/Disconnect selected VPN"),
         Line::from("  r           - Refresh VPN status"),
@@ -385,7 +464,9 @@ fn draw_help_screen(f: &mut Frame) {
         Line::from(""),
         Line::from(vec![Span::styled(
             "Profile Management:",
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
         )]),
         Line::from("  n           - Add new profile"),
         Line::from("  e           - Edit selected profile"),
@@ -396,14 +477,18 @@ fn draw_help_screen(f: &mut Frame) {
         Line::from(""),
         Line::from(vec![Span::styled(
             "View:",
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
         )]),
         Line::from("  l           - Toggle logs panel"),
         Line::from("  h/F1        - Show this help"),
         Line::from(""),
         Line::from(vec![Span::styled(
             "Exit:",
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
         )]),
         Line::from("  q           - Quit application"),
         Line::from("  Ctrl+C      - Force quit"),
@@ -461,7 +546,7 @@ fn draw_delete_confirmation(f: &mut Frame, app: &App) {
         .borders(Borders::ALL)
         .title(" Confirm Deletion ")
         .border_style(Style::default().fg(Color::Red));
-    
+
     let text = vec![
         Line::from(""),
         Line::from(vec![
@@ -471,9 +556,17 @@ fn draw_delete_confirmation(f: &mut Frame, app: &App) {
         ]),
         Line::from(""),
         Line::from(vec![
-            Span::styled("y", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "y",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(": Yes, "),
-            Span::styled("n", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "n",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
             Span::raw(": No"),
         ]),
     ];
@@ -481,7 +574,7 @@ fn draw_delete_confirmation(f: &mut Frame, app: &App) {
     let para = Paragraph::new(text)
         .alignment(Alignment::Center)
         .block(block);
-    
+
     f.render_widget(ratatui::widgets::Clear, area); // Clear the area before rendering the popup
     f.render_widget(para, area);
 }
@@ -492,11 +585,11 @@ fn draw_search_bar(f: &mut Frame, app: &App) {
         .borders(Borders::ALL)
         .title(" Search (Name or Category) ")
         .border_style(Style::default().fg(Color::Yellow));
-    
+
     let input = Paragraph::new(format!("/{}", app.search_query))
         .block(block)
         .style(Style::default().fg(Color::Yellow));
-    
+
     f.render_widget(ratatui::widgets::Clear, area);
     f.render_widget(input, area);
 }
@@ -514,11 +607,11 @@ fn draw_alias_modal(f: &mut Frame, app: &App) {
         .borders(Borders::ALL)
         .title(format!(" Alias for {} ", profile_name))
         .border_style(Style::default().fg(Color::Cyan));
-    
+
     let input = Paragraph::new(app.alias_input.clone())
         .block(block)
         .style(Style::default().fg(Color::Cyan));
-    
+
     f.render_widget(ratatui::widgets::Clear, area);
     f.render_widget(input, area);
 

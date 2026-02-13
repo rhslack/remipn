@@ -1,5 +1,5 @@
 use crate::config::VpnProfile;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use async_process::Command;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -152,7 +152,7 @@ impl VpnManager {
         let active_vpns = self.get_active_vpns().await?;
 
         let mut connections = self.connections.write().await;
-        
+
         // Ensure all profiles are in the map
         for p in profiles {
             if !connections.contains_key(&p.name) {
@@ -171,8 +171,17 @@ impl VpnManager {
         }
 
         for (_, conn) in connections.iter_mut() {
-            if let Some(active_info) = active_vpns.iter().find(|(name, _)| name == &conn.profile_name) {
-                log::debug!("{} {} {} {}", conn.status.as_str(), conn.profile_name, active_info.0, active_info.1.as_deref().unwrap_or(""));
+            if let Some(active_info) = active_vpns
+                .iter()
+                .find(|(name, _)| name == &conn.profile_name)
+            {
+                log::debug!(
+                    "{} {} {} {}",
+                    conn.status.as_str(),
+                    conn.profile_name,
+                    active_info.0,
+                    active_info.1.as_deref().unwrap_or("")
+                );
                 if !matches!(conn.status, VpnStatus::Connected) {
                     conn.status = VpnStatus::Connected;
                     conn.connected_since = Some(chrono::Local::now());
@@ -212,8 +221,10 @@ impl VpnManager {
                 .await?;
 
             if !output.status.success() {
-                return Err(anyhow!("Failed to connect: {}",
-                    String::from_utf8_lossy(&output.stderr)));
+                return Err(anyhow!(
+                    "Failed to connect: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                ));
             }
         }
 
@@ -228,8 +239,10 @@ impl VpnManager {
                 .await?;
 
             if !output.status.success() {
-                return Err(anyhow!("Failed to connect: {}",
-                    String::from_utf8_lossy(&output.stderr)));
+                return Err(anyhow!(
+                    "Failed to connect: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                ));
             }
         }
 
@@ -256,8 +269,13 @@ impl VpnManager {
                         profile.name
                     ));
                 }
-                if combined.to_lowercase().contains("authentication") || combined.to_lowercase().contains("login") {
-                    return Err(anyhow!("Azure VPN authentication required. Check system pop-ups or run: scutil --nc start '{}'", profile.name));
+                if combined.to_lowercase().contains("authentication")
+                    || combined.to_lowercase().contains("login")
+                {
+                    return Err(anyhow!(
+                        "Azure VPN authentication required. Check system pop-ups or run: scutil --nc start '{}'",
+                        profile.name
+                    ));
                 }
                 return Err(anyhow!("Failed to connect: {}", stderr));
             }
@@ -277,8 +295,10 @@ impl VpnManager {
                 .await?;
 
             if !output.status.success() {
-                return Err(anyhow!("Failed to disconnect: {}",
-                    String::from_utf8_lossy(&output.stderr)));
+                return Err(anyhow!(
+                    "Failed to disconnect: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                ));
             }
         }
 
@@ -292,8 +312,10 @@ impl VpnManager {
                 .await?;
 
             if !output.status.success() {
-                return Err(anyhow!("Failed to disconnect: {}",
-                    String::from_utf8_lossy(&output.stderr)));
+                return Err(anyhow!(
+                    "Failed to disconnect: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                ));
             }
         }
 
@@ -307,8 +329,10 @@ impl VpnManager {
                 .await?;
 
             if !output.status.success() {
-                return Err(anyhow!("Failed to disconnect: {}",
-                    String::from_utf8_lossy(&output.stderr)));
+                return Err(anyhow!(
+                    "Failed to disconnect: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                ));
             }
         }
 
@@ -321,9 +345,7 @@ impl VpnManager {
 
         #[cfg(target_os = "windows")]
         {
-            let output = Command::new("rasdial")
-                .output()
-                .await?;
+            let output = Command::new("rasdial").output().await?;
 
             let stdout = String::from_utf8_lossy(&output.stdout);
             for line in stdout.lines() {
@@ -353,7 +375,10 @@ impl VpnManager {
                 let parts: Vec<&str> = line.split(':').collect();
                 if parts.len() >= 3 && parts[1].contains("vpn") {
                     let name = parts[0].to_string();
-                    let ip = parts.get(3).filter(|s| !s.is_empty()).map(|s| s.to_string());
+                    let ip = parts
+                        .get(3)
+                        .filter(|s| !s.is_empty())
+                        .map(|s| s.to_string());
                     active.push((name, ip));
                 }
             }
@@ -369,7 +394,9 @@ impl VpnManager {
 
             let stdout = String::from_utf8_lossy(&output.stdout);
             for line in stdout.lines() {
-                if line.contains("Connected") && let Some(name) = line.split('"').nth(1) {
+                if line.contains("Connected")
+                    && let Some(name) = line.split('"').nth(1)
+                {
                     active.push((name.to_string(), self.get_macos_ip(name).await));
                 }
             }
@@ -381,19 +408,18 @@ impl VpnManager {
     #[cfg(target_os = "macos")]
     async fn get_macos_ip(&self, _name: &str) -> Option<String> {
         // This is a heuristic: look for utun interfaces which are common for VPNs
-        let output = Command::new("ifconfig")
-            .output()
-            .await
-            .ok()?;
-        
+        let output = Command::new("ifconfig").output().await.ok()?;
+
         let stdout = String::from_utf8_lossy(&output.stdout);
         let mut current_interface = None;
-        
+
         for line in stdout.lines() {
             if !line.starts_with('\t') {
                 current_interface = line.split(':').next();
             } else if let Some(iface) = current_interface
-                && iface.starts_with("utun") && line.contains("inet ") {
+                && iface.starts_with("utun")
+                && line.contains("inet ")
+            {
                 let parts: Vec<&str> = line.split_whitespace().collect();
                 if parts.len() >= 2 {
                     return Some(parts[1].to_string());

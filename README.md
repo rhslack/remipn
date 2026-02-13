@@ -1,6 +1,6 @@
 # remipn
 
-[![CI](https://github.com/yourusername/remipn/actions/workflows/ci.yml/badge.svg)](https://github.com/yourusername/remipn/actions/workflows/ci.yml)
+[![CI](https://github.com/rhslack/remipn/actions/workflows/ci.yml/badge.svg)](https://github.com/rhslack/remipn/actions/workflows/ci.yml)
 
 **Remipn** is a modern, lightweight, cross-platform VPN manager written in Rust. It offers an interactive Terminal User Interface (TUI) and a powerful Command Line Interface (CLI) to manage your VPN connections with ease.
 

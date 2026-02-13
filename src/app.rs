@@ -53,7 +53,7 @@ impl FileBrowser {
 
     pub fn refresh(&mut self) -> Result<()> {
         self.entries.clear();
-        
+
         // Add a parent directory entry if not at root
         if let Some(parent) = self.current_dir.parent() {
             self.entries.push(FileEntry {
@@ -69,14 +69,10 @@ impl FileBrowser {
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().to_string();
             let is_dir = entry.file_type()?.is_dir();
-            
+
             // Only show directories or .xml files
             if is_dir || name.to_lowercase().ends_with(".xml") {
-                entries.push(FileEntry {
-                    name,
-                    path,
-                    is_dir,
-                });
+                entries.push(FileEntry { name, path, is_dir });
             }
         }
 
@@ -271,7 +267,8 @@ impl App {
             KeyCode::PageDown => {
                 let profiles_len = self.get_filtered_profiles_indices().len();
                 if profiles_len > 0 {
-                    self.selected_profile = (self.selected_profile + 10).min(profiles_len.saturating_sub(1));
+                    self.selected_profile =
+                        (self.selected_profile + 10).min(profiles_len.saturating_sub(1));
                     self.table_state.select(Some(self.selected_profile));
                 }
             }
@@ -321,7 +318,10 @@ impl App {
                 let indices = self.get_filtered_profiles_indices();
                 if !indices.is_empty() && self.selected_profile < indices.len() {
                     let actual_index = indices[self.selected_profile];
-                    self.alias_input = self.config.profiles[actual_index].aliases.clone().unwrap_or_default();
+                    self.alias_input = self.config.profiles[actual_index]
+                        .aliases
+                        .clone()
+                        .unwrap_or_default();
                     self.screen = Screen::AliasModal;
                     self.input_mode = InputMode::Editing;
                 }
@@ -358,7 +358,11 @@ impl App {
                 }
             }
             KeyCode::BackTab => {
-                self.input_field = if self.input_field == 0 { 5 } else { self.input_field - 1 };
+                self.input_field = if self.input_field == 0 {
+                    5
+                } else {
+                    self.input_field - 1
+                };
                 // Skip the name field (index 0) if editing
                 if self.screen == Screen::EditProfile && self.input_field == 0 {
                     self.input_field = 5;
@@ -475,7 +479,11 @@ impl App {
                 let indices = self.get_filtered_profiles_indices();
                 if !indices.is_empty() && self.selected_profile < indices.len() {
                     let actual_index = indices[self.selected_profile];
-                    let alias = if self.alias_input.is_empty() { None } else { Some(self.alias_input.clone()) };
+                    let alias = if self.alias_input.is_empty() {
+                        None
+                    } else {
+                        Some(self.alias_input.clone())
+                    };
                     self.config.profiles[actual_index].aliases = alias;
                     self.config.save()?;
                     self.set_status_message("Alias updated".to_string());
@@ -529,7 +537,10 @@ impl App {
                         self.screen = Screen::Main;
                         self.input_mode = InputMode::Normal;
                         self.set_status_message(format!("Imported {} profiles", count));
-                        self.add_log(format!("Successfully imported {} profiles from {}", count, path));
+                        self.add_log(format!(
+                            "Successfully imported {} profiles from {}",
+                            count, path
+                        ));
                     }
                     Err(e) => {
                         self.set_status_message(format!("Import error: {}", e));
@@ -547,7 +558,7 @@ impl App {
 
     async fn toggle_connection(&mut self) -> Result<()> {
         use std::time::Instant;
-        use tokio::time::{sleep, Duration};
+        use tokio::time::{Duration, sleep};
 
         let indices = self.get_filtered_profiles_indices();
         if indices.is_empty() || self.selected_profile >= indices.len() {
@@ -573,19 +584,34 @@ impl App {
                             self.refresh_status().await.ok();
                             match self.vpn_manager.get_status(&profile_name).await {
                                 VpnStatus::Disconnected => {
-                                    self.set_status_message(format!("Disconnected from {}", profile_name));
-                                    self.add_log(format!("Successfully disconnected from {}", profile_name));
+                                    self.set_status_message(format!(
+                                        "Disconnected from {}",
+                                        profile_name
+                                    ));
+                                    self.add_log(format!(
+                                        "Successfully disconnected from {}",
+                                        profile_name
+                                    ));
                                     break;
                                 }
                                 VpnStatus::Error(e) => {
                                     self.set_status_message(format!("Disconnect error: {}", e));
-                                    self.add_log(format!("Disconnect error for {}: {}", profile_name, e));
+                                    self.add_log(format!(
+                                        "Disconnect error for {}: {}",
+                                        profile_name, e
+                                    ));
                                     break;
                                 }
                                 _ => {
                                     if start.elapsed() > timeout {
-                                        self.set_status_message(format!("Timeout while disconnecting {}", profile_name));
-                                        self.add_log(format!("Timeout waiting for disconnection of {}", profile_name));
+                                        self.set_status_message(format!(
+                                            "Timeout while disconnecting {}",
+                                            profile_name
+                                        ));
+                                        self.add_log(format!(
+                                            "Timeout waiting for disconnection of {}",
+                                            profile_name
+                                        ));
                                         break;
                                     }
                                     sleep(Duration::from_secs(1)).await;
@@ -600,7 +626,7 @@ impl App {
                 }
             }
             _ => {
-                // The VpnManager::connect implementation already handles disconnecting 
+                // The VpnManager::connect implementation already handles disconnecting
                 // other VPNs to ensure single connection.
                 let max_retries = 2u32; // number of additional retries
                 let mut attempt: u32 = 0;
@@ -637,7 +663,10 @@ impl App {
                                 break;
                             }
                             VpnStatus::Error(e) => {
-                                self.add_log(format!("Status error while connecting {}: {}", profile_name, e));
+                                self.add_log(format!(
+                                    "Status error while connecting {}: {}",
+                                    profile_name, e
+                                ));
                                 break;
                             }
                             _ => {
@@ -656,8 +685,16 @@ impl App {
                     }
 
                     if attempt >= max_retries {
-                        self.set_status_message(format!("Failed to connect to {} after {} attempts", profile_name, max_retries + 1));
-                        self.add_log(format!("Failed to connect to {} after {} attempts", profile_name, max_retries + 1));
+                        self.set_status_message(format!(
+                            "Failed to connect to {} after {} attempts",
+                            profile_name,
+                            max_retries + 1
+                        ));
+                        self.add_log(format!(
+                            "Failed to connect to {} after {} attempts",
+                            profile_name,
+                            max_retries + 1
+                        ));
                         break;
                     }
 
@@ -671,21 +708,32 @@ impl App {
         Ok(())
     }
 
-
     fn save_new_profile(&mut self) -> Result<()> {
         let name = self.add_profile_data[0].clone();
         if name.is_empty() {
             self.set_status_message("Name cannot be empty".to_string());
             return Ok(());
         }
-        
+
         let profile = VpnProfile {
             name,
             gateway_address: self.add_profile_data[1].clone(),
             category: self.add_profile_data[2].clone(),
-            cert_path: if self.add_profile_data[3].is_empty() { None } else { Some(self.add_profile_data[3].clone()) },
-            username: if self.add_profile_data[4].is_empty() { None } else { Some(self.add_profile_data[4].clone()) },
-            aliases: if self.add_profile_data[5].is_empty() { None } else { Some(self.add_profile_data[5].clone()) },
+            cert_path: if self.add_profile_data[3].is_empty() {
+                None
+            } else {
+                Some(self.add_profile_data[3].clone())
+            },
+            username: if self.add_profile_data[4].is_empty() {
+                None
+            } else {
+                Some(self.add_profile_data[4].clone())
+            },
+            aliases: if self.add_profile_data[5].is_empty() {
+                None
+            } else {
+                Some(self.add_profile_data[5].clone())
+            },
             protocol: "IKEv2".to_string(),
             auto_connect: false,
         };
@@ -704,7 +752,14 @@ impl App {
         self.config.save()?;
         self.screen = Screen::Main;
         self.input_mode = InputMode::Normal;
-        self.set_status_message(if is_edit { "Profile updated" } else { "Profile added" }.to_string());
+        self.set_status_message(
+            if is_edit {
+                "Profile updated"
+            } else {
+                "Profile added"
+            }
+            .to_string(),
+        );
         Ok(())
     }
 
@@ -734,7 +789,8 @@ impl App {
     fn load_profile_to_edit(&mut self) {
         let indices = self.get_filtered_profiles_indices();
         if let Some(&actual_index) = indices.get(self.selected_profile)
-            && let Some(profile) = self.config.profiles.get(actual_index) {
+            && let Some(profile) = self.config.profiles.get(actual_index)
+        {
             self.add_profile_data[0] = profile.name.clone();
             self.add_profile_data[1] = profile.gateway_address.clone();
             self.add_profile_data[2] = profile.category.clone();
@@ -750,35 +806,49 @@ impl App {
             (0..self.config.profiles.len()).collect()
         } else {
             let query = self.search_query.to_lowercase();
-            self.config.profiles.iter().enumerate()
+            self.config
+                .profiles
+                .iter()
+                .enumerate()
                 .filter(|(_, p)| {
-                    p.name.to_lowercase().contains(&query) || 
-                    p.category.to_lowercase().contains(&query) ||
-                    p.aliases.iter().any(|a| a.to_lowercase().contains(&query))
+                    p.name.to_lowercase().contains(&query)
+                        || p.category.to_lowercase().contains(&query)
+                        || p.aliases.iter().any(|a| a.to_lowercase().contains(&query))
                 })
                 .map(|(i, _)| i)
                 .collect()
         };
 
         // Apply sorting
-        let connections = self.connections.iter()
+        let connections = self
+            .connections
+            .iter()
             .map(|c| (c.profile_name.clone(), c.clone()))
             .collect::<std::collections::HashMap<_, _>>();
 
         indices.sort_by(|&a, &b| {
             let p_a = &self.config.profiles[a];
             let p_b = &self.config.profiles[b];
-            
+
             let res = match self.sort_column {
                 SortColumn::Name => p_a.name.to_lowercase().cmp(&p_b.name.to_lowercase()),
-                SortColumn::Category => p_a.category.to_lowercase().cmp(&p_b.category.to_lowercase()),
+                SortColumn::Category => p_a
+                    .category
+                    .to_lowercase()
+                    .cmp(&p_b.category.to_lowercase()),
                 SortColumn::Status => {
-                    let s_a = connections.get(&p_a.name).map(|c| c.status.as_str()).unwrap_or("Disconnected");
-                    let s_b = connections.get(&p_b.name).map(|c| c.status.as_str()).unwrap_or("Disconnected");
+                    let s_a = connections
+                        .get(&p_a.name)
+                        .map(|c| c.status.as_str())
+                        .unwrap_or("Disconnected");
+                    let s_b = connections
+                        .get(&p_b.name)
+                        .map(|c| c.status.as_str())
+                        .unwrap_or("Disconnected");
                     s_a.cmp(s_b)
                 }
             };
-            
+
             if self.sort_direction == SortDirection::Asc {
                 res
             } else {
@@ -816,12 +886,17 @@ impl App {
                 }
             }
         }
-        self.set_status_message(format!("Sorting by {:?} ({:?})", self.sort_column, self.sort_direction));
+        self.set_status_message(format!(
+            "Sorting by {:?} ({:?})",
+            self.sort_column, self.sort_direction
+        ));
     }
 
     async fn refresh_status(&mut self) -> Result<()> {
         // self.add_log("Refreshing VPN status...".to_string());
-        self.vpn_manager.refresh_all_status(&self.config.profiles).await?;
+        self.vpn_manager
+            .refresh_all_status(&self.config.profiles)
+            .await?;
         self.connections = self.vpn_manager.get_all_connections().await;
         // self.set_status_message("Status refreshed".to_string());
         Ok(())

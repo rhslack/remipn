@@ -1,28 +1,30 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use clap::{Parser, Subcommand};
 use colored::*;
 use comfy_table::Table;
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use ratatui::{
-    backend::CrosstermBackend,
-    Terminal,
-};
+use ratatui::{Terminal, backend::CrosstermBackend};
 use std::io;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-use remipn::{App};
+use remipn::App;
 use remipn::app::AppEvent;
 use remipn::config::Config;
 use remipn::vpn::VpnManager;
 
 #[derive(Debug, Parser)]
-#[command(name = "remipn", version, about = "Remi VPN Manager", disable_help_subcommand = false)]
+#[command(
+    name = "remipn",
+    version,
+    about = "Remi VPN Manager",
+    disable_help_subcommand = false
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -94,8 +96,11 @@ async fn run_app<B: ratatui::backend::Backend>(
 
     // Auto-import profiles at startup
     if let Ok(imported) = app.config.auto_import_profiles()
-        && imported {
-        app.add_log("Automatically imported new profiles from ~/.config/remipn/imports/".to_string());
+        && imported
+    {
+        app.add_log(
+            "Automatically imported new profiles from ~/.config/remipn/imports/".to_string(),
+        );
     }
 
     // Input thread
@@ -105,7 +110,8 @@ async fn run_app<B: ratatui::backend::Backend>(
             if event::poll(Duration::from_millis(100)).unwrap_or(false)
                 && let Event::Key(key) = event::read().unwrap()
                 && key.kind == KeyEventKind::Press
-                && tx_input.send(AppEvent::Input(key)).await.is_err() {
+                && tx_input.send(AppEvent::Input(key)).await.is_err()
+            {
                 break;
             }
         }
@@ -129,7 +135,9 @@ async fn run_app<B: ratatui::backend::Backend>(
         if let Some(event) = rx.recv().await {
             match event {
                 AppEvent::Input(key) => {
-                    if key.code == KeyCode::Char('c') && key.modifiers.contains(event::KeyModifiers::CONTROL) {
+                    if key.code == KeyCode::Char('c')
+                        && key.modifiers.contains(event::KeyModifiers::CONTROL)
+                    {
                         return Ok(());
                     }
                     if let Some(()) = app.handle_event(AppEvent::Input(key)).await? {
@@ -173,26 +181,34 @@ async fn cmd_status(name: Option<String>) -> Result<()> {
                 .map(|p| p.name.clone())
                 .unwrap_or(n);
             let status = mgr.get_status(&target).await;
-            
+
             // Find profile for extra info
             let profile = cfg.profiles.iter().find(|p| p.name == target);
             let category = profile.map(|p| p.category.as_str()).unwrap_or("-");
-            
+
             // Find connection for IP
             let connections = mgr.get_all_connections().await;
-            let ip = connections.iter()
+            let ip = connections
+                .iter()
                 .find(|c| c.profile_name == target)
                 .and_then(|c| c.ip_address.clone())
                 .unwrap_or_else(|| "-".to_string());
 
             let status_str = format_status_cli(&status);
-            
-            println!("{} {} | IP: {} | Cat: {}", "Profile:".bold(), target.bold().cyan(), ip.green(), category.dimmed());
+
+            println!(
+                "{} {} | IP: {} | Cat: {}",
+                "Profile:".bold(),
+                target.bold().cyan(),
+                ip.green(),
+                category.dimmed()
+            );
             println!("{} {}", "Status:".bold(), status_str);
         }
         None => {
             let connections = mgr.get_all_connections().await;
-            let connected_vpns: Vec<_> = connections.iter()
+            let connected_vpns: Vec<_> = connections
+                .iter()
                 .filter(|c| matches!(c.status, remipn::vpn::VpnStatus::Connected))
                 .collect();
 
@@ -203,15 +219,21 @@ async fn cmd_status(name: Option<String>) -> Result<()> {
                     let profile = cfg.profiles.iter().find(|p| p.name == c.profile_name);
                     let category = profile.map(|p| p.category.as_str()).unwrap_or("-");
                     let status_str = format_status_cli(&c.status);
-                    
-                    println!("{} {} | IP: {} | Cat: {}", "Profile:".bold(), c.profile_name.bold().cyan(), c.ip_address.as_deref().unwrap_or("-").green(), category.dimmed());
+
+                    println!(
+                        "{} {} | IP: {} | Cat: {}",
+                        "Profile:".bold(),
+                        c.profile_name.bold().cyan(),
+                        c.ip_address.as_deref().unwrap_or("-").green(),
+                        category.dimmed()
+                    );
                     println!("{} {}", "Status:".bold(), status_str);
                     println!("{}", "-".repeat(40).dimmed());
                 }
             }
         }
     }
-    
+
     Ok(())
 }
 
@@ -273,7 +295,11 @@ async fn cmd_connect(name: String) -> Result<()> {
     Ok(())
 }
 
-
-fn resolve_profile<'a>(profiles: &'a [remipn::config::VpnProfile], key: &str) -> Option<&'a remipn::config::VpnProfile> {
-    profiles.iter().find(|p| p.name == key || p.aliases.iter().any(|a| a == key))
+fn resolve_profile<'a>(
+    profiles: &'a [remipn::config::VpnProfile],
+    key: &str,
+) -> Option<&'a remipn::config::VpnProfile> {
+    profiles
+        .iter()
+        .find(|p| p.name == key || p.aliases.iter().any(|a| a == key))
 }
