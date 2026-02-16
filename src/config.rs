@@ -71,12 +71,54 @@ impl Config {
         Ok(import_dir)
     }
 
+    pub fn azure_vpn_import_dir() -> Result<PathBuf> {
+        #[cfg(target_os = "macos")]
+        {
+            let azure_dir = dirs::home_dir()
+                .ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?
+                .join("Library/Containers/com.microsoft.AzureVpnMac/Data/Library/Application Support/com.microsoft.AzureVpnMac");
+            Ok(azure_dir)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Err(anyhow::anyhow!(
+                "Azure VPN Client path not supported on this OS"
+            ))
+        }
+    }
+
     pub fn auto_import_profiles(&mut self) -> Result<bool> {
-        let import_dir = Self::import_dir()?;
         let mut imported_any = false;
 
-        if import_dir.exists() {
-            for entry in fs::read_dir(import_dir)? {
+        // Import from default import dir
+        if let Ok(import_dir) = Self::import_dir()
+            && self.import_from_dir(&import_dir)?
+        {
+            imported_any = true;
+        }
+
+        // Import from Azure VPN Client dir on macOS
+        #[cfg(target_os = "macos")]
+        {
+            if let Ok(azure_dir) = Self::azure_vpn_import_dir()
+                && azure_dir.exists()
+                && self.import_from_dir(&azure_dir)?
+            {
+                imported_any = true;
+            }
+        }
+
+        if imported_any {
+            self.save()?;
+        }
+
+        Ok(imported_any)
+    }
+
+    fn import_from_dir(&mut self, dir: &PathBuf) -> Result<bool> {
+        let mut imported_any = false;
+        if dir.exists() {
+            for entry in fs::read_dir(dir)? {
                 let entry = entry?;
                 let path = entry.path();
                 if path.is_file() {
@@ -94,25 +136,10 @@ impl Config {
                                 }
                             }
                         }
-                        #[cfg(target_os = "macos")]
-                        {
-                            if extension == Some("azvpn") {
-                                let _ = std::process::Command::new("open")
-                                    .arg("-a")
-                                    .arg("Azure VPN Client")
-                                    .arg(&path)
-                                    .output();
-                            }
-                        }
                     }
                 }
             }
         }
-
-        if imported_any {
-            self.save()?;
-        }
-
         Ok(imported_any)
     }
 

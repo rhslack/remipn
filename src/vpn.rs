@@ -9,26 +9,28 @@ use tokio::sync::RwLock;
 pub enum VpnStatus {
     Connected,
     Connecting,
+    Retrying(u32, u32),
     Disconnected,
     Disconnecting,
     Error(String),
 }
 
 impl VpnStatus {
-    pub fn as_str(&self) -> &str {
+    pub fn as_str(&self) -> String {
         match self {
-            VpnStatus::Connected => "Connected",
-            VpnStatus::Connecting => "Connecting...",
-            VpnStatus::Disconnected => "Disconnected",
-            VpnStatus::Disconnecting => "Disconnecting...",
-            VpnStatus::Error(_) => "Error",
+            VpnStatus::Connected => "Connected".to_string(),
+            VpnStatus::Connecting => "Connecting...".to_string(),
+            VpnStatus::Retrying(a, m) => format!("Retry {}/{}...", a, m),
+            VpnStatus::Disconnected => "Disconnected".to_string(),
+            VpnStatus::Disconnecting => "Disconnecting...".to_string(),
+            VpnStatus::Error(_) => "Error".to_string(),
         }
     }
 
     pub fn color(&self) -> ratatui::style::Color {
         match self {
             VpnStatus::Connected => ratatui::style::Color::Green,
-            VpnStatus::Connecting => ratatui::style::Color::Yellow,
+            VpnStatus::Connecting | VpnStatus::Retrying(_, _) => ratatui::style::Color::Yellow,
             VpnStatus::Disconnected => ratatui::style::Color::Gray,
             VpnStatus::Disconnecting => ratatui::style::Color::Yellow,
             VpnStatus::Error(_) => ratatui::style::Color::Red,
@@ -46,6 +48,7 @@ pub struct VpnConnection {
     pub bytes_received: u64,
 }
 
+#[derive(Debug, Clone)]
 pub struct VpnManager {
     connections: Arc<RwLock<HashMap<String, VpnConnection>>>,
 }
@@ -64,6 +67,26 @@ impl VpnManager {
         for (name, _) in active_vpns {
             if name != profile.name {
                 let _ = self.disconnect(&name).await;
+
+                // Wait for it to be effectively disconnected
+                let mut disconnected = false;
+                // Give the system a moment to start the disconnection process
+                tokio::time::sleep(tokio::time::Duration::from_millis(800)).await;
+
+                for _ in 0..40 {
+                    let sys_status = self.get_system_status(&name).await;
+                    if matches!(sys_status, VpnStatus::Disconnected) {
+                        disconnected = true;
+                        break;
+                    }
+                    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+                }
+                if !disconnected {
+                    return Err(anyhow!(
+                        "Failed to disconnect previous VPN: {}. Current state still not Disconnected.",
+                        name
+                    ));
+                }
             }
         }
 
@@ -144,6 +167,82 @@ impl VpnManager {
             .get(profile_name)
             .map(|c| c.status.clone())
             .unwrap_or(VpnStatus::Disconnected)
+    }
+
+    /// Get the actual system status of a VPN connection
+    pub async fn get_system_status(&self, profile_name: &str) -> VpnStatus {
+        #[cfg(target_os = "macos")]
+        {
+            if let Ok(output) = Command::new("scutil")
+                .arg("--nc")
+                .arg("status")
+                .arg(profile_name)
+                .output()
+                .await
+            {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let first_line = stdout.lines().next().unwrap_or("");
+                if first_line.contains("Connected") && !first_line.contains("Disconnected") {
+                    return VpnStatus::Connected;
+                } else if first_line.contains("Connecting") {
+                    return VpnStatus::Connecting;
+                } else if first_line.contains("Disconnecting") {
+                    return VpnStatus::Disconnecting;
+                } else {
+                    return VpnStatus::Disconnected;
+                }
+            }
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            if let Ok(output) = Command::new("nmcli")
+                .arg("-t")
+                .arg("-f")
+                .arg("NAME,STATE")
+                .arg("connection")
+                .arg("show")
+                .arg("--active")
+                .output()
+                .await
+            {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                for line in stdout.lines() {
+                    let parts: Vec<&str> = line.split(':').collect();
+                    if parts.len() >= 2 && parts[0] == profile_name {
+                        let state = parts[1].to_lowercase();
+                        if state.contains("activated") && !state.contains("deactivated") {
+                            return VpnStatus::Connected;
+                        } else if state.contains("activating") {
+                            return VpnStatus::Connecting;
+                        } else if state.contains("deactivating") {
+                            return VpnStatus::Disconnecting;
+                        }
+                    }
+                }
+            }
+        }
+
+        VpnStatus::Disconnected
+    }
+
+    pub async fn set_status(&self, profile_name: &str, status: VpnStatus) {
+        let mut connections = self.connections.write().await;
+        if let Some(conn) = connections.get_mut(profile_name) {
+            conn.status = status;
+        } else {
+            connections.insert(
+                profile_name.to_string(),
+                VpnConnection {
+                    profile_name: profile_name.to_string(),
+                    status,
+                    connected_since: None,
+                    ip_address: None,
+                    bytes_sent: 0,
+                    bytes_received: 0,
+                },
+            );
+        }
     }
 
     /// Refresh status for all connections
@@ -340,7 +439,7 @@ impl VpnManager {
     }
 
     /// Get a list of currently active VPN connections with a list of optional IP addresses
-    async fn get_active_vpns(&self) -> Result<Vec<(String, Option<String>)>> {
+    pub async fn get_active_vpns(&self) -> Result<Vec<(String, Option<String>)>> {
         let mut active = Vec::new();
 
         #[cfg(target_os = "windows")]
