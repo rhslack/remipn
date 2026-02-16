@@ -786,13 +786,13 @@ impl App {
                                     break;
                                 }
 
-                                if let Ok(active) = vpn_manager.get_active_vpns().await {
-                                    if active.iter().any(|(name, _)| name != &profile_name) {
-                                        let _ = event_tx.send(AppEvent::Notification("Another active VPN detected during stabilization. Ensuring exclusivity...".to_string())).await;
-                                        for (name, _) in active {
-                                            if name != profile_name {
-                                                let _ = vpn_manager.disconnect(&name).await;
-                                            }
+                                if let Ok(active) = vpn_manager.get_active_vpns().await
+                                    && active.iter().any(|(name, _)| name != &profile_name)
+                                {
+                                    let _ = event_tx.send(AppEvent::Notification("Another active VPN detected during stabilization. Ensuring exclusivity...".to_string())).await;
+                                    for (name, _) in active {
+                                        if name != profile_name {
+                                            let _ = vpn_manager.disconnect(&name).await;
                                         }
                                     }
                                 }

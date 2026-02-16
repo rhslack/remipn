@@ -398,12 +398,12 @@ async fn cmd_connect(name: String) -> Result<()> {
                 }
 
                 // ensure no other VPN is active
-                if let Ok(active) = mgr.get_active_vpns().await {
-                    if active.iter().any(|(name, _)| name != &profile_name) {
-                        for (name, _) in active {
-                            if name != profile_name {
-                                let _ = mgr.disconnect(&name).await;
-                            }
+                if let Ok(active) = mgr.get_active_vpns().await
+                    && active.iter().any(|(name, _)| name != &profile_name)
+                {
+                    for (name, _) in active {
+                        if name != profile_name {
+                            let _ = mgr.disconnect(&name).await;
                         }
                     }
                 }

@@ -91,21 +91,20 @@ impl Config {
         let mut imported_any = false;
 
         // Import from default import dir
-        if let Ok(import_dir) = Self::import_dir() {
-            if self.import_from_dir(&import_dir)? {
-                imported_any = true;
-            }
+        if let Ok(import_dir) = Self::import_dir()
+            && self.import_from_dir(&import_dir)?
+        {
+            imported_any = true;
         }
 
         // Import from Azure VPN Client dir on macOS
         #[cfg(target_os = "macos")]
         {
-            if let Ok(azure_dir) = Self::azure_vpn_import_dir() {
-                if azure_dir.exists() {
-                    if self.import_from_dir(&azure_dir)? {
-                        imported_any = true;
-                    }
-                }
+            if let Ok(azure_dir) = Self::azure_vpn_import_dir()
+                && azure_dir.exists()
+                && self.import_from_dir(&azure_dir)?
+            {
+                imported_any = true;
             }
         }
 
