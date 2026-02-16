@@ -119,10 +119,7 @@ fn draw_vpn_list(f: &mut Frame, app: &App, area: Rect) {
                 Cell::from(profile.name.clone()),
                 Cell::from(alias),
                 Cell::from(profile.category.clone()),
-                Cell::from(Span::styled(
-                    status_text,
-                    Style::default().fg(status_color),
-                )),
+                Cell::from(Span::styled(status_text, Style::default().fg(status_color))),
                 Cell::from(connected_time),
                 Cell::from(ip_addr),
             ])

@@ -81,7 +81,9 @@ impl Config {
         }
         #[cfg(not(target_os = "macos"))]
         {
-            Err(anyhow::anyhow!("Azure VPN Client path not supported on this OS"))
+            Err(anyhow::anyhow!(
+                "Azure VPN Client path not supported on this OS"
+            ))
         }
     }
 

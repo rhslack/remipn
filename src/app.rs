@@ -334,9 +334,13 @@ impl App {
             KeyCode::Char('I') => {
                 if let Ok(imported) = self.config.auto_import_profiles() {
                     if imported {
-                        self.add_log("Manually imported new profiles from standard locations".to_string());
+                        self.add_log(
+                            "Manually imported new profiles from standard locations".to_string(),
+                        );
                     } else {
-                        self.set_status_message("No new profiles found in standard locations".to_string());
+                        self.set_status_message(
+                            "No new profiles found in standard locations".to_string(),
+                        );
                     }
                 }
             }
@@ -724,9 +728,11 @@ impl App {
                                     profile_name, e
                                 )))
                                 .await;
-                            
+
                             // If it failed due to a disconnection error, let's update the status and potentially retry
-                            let _ = event_tx.send(AppEvent::SetStatusMessage(format!("Error: {}", e))).await;
+                            let _ = event_tx
+                                .send(AppEvent::SetStatusMessage(format!("Error: {}", e)))
+                                .await;
                         }
 
                         let start = Instant::now();
@@ -770,9 +776,12 @@ impl App {
                             for _ in 0..15 {
                                 sleep(Duration::from_millis(200)).await;
                                 let _ = event_tx.send(AppEvent::VpnStatusUpdated).await;
-                                
+
                                 // Ensure our target VPN is still connected
-                                if !matches!(vpn_manager.get_status(&profile_name).await, VpnStatus::Connected) {
+                                if !matches!(
+                                    vpn_manager.get_status(&profile_name).await,
+                                    VpnStatus::Connected
+                                ) {
                                     stable = false;
                                     break;
                                 }
@@ -834,7 +843,10 @@ impl App {
 
                         attempt += 1;
                         let _ = vpn_manager
-                            .set_status(&profile_name, VpnStatus::Retrying(attempt, max_retries + 1))
+                            .set_status(
+                                &profile_name,
+                                VpnStatus::Retrying(attempt, max_retries + 1),
+                            )
                             .await;
                         let _ = event_tx
                             .send(AppEvent::Notification(format!(

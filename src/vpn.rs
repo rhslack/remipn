@@ -82,7 +82,10 @@ impl VpnManager {
                     tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
                 }
                 if !disconnected {
-                    return Err(anyhow!("Failed to disconnect previous VPN: {}. Current state still not Disconnected.", name));
+                    return Err(anyhow!(
+                        "Failed to disconnect previous VPN: {}. Current state still not Disconnected.",
+                        name
+                    ));
                 }
             }
         }

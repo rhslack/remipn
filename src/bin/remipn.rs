@@ -142,25 +142,23 @@ async fn run_app<B: ratatui::backend::Backend>(
         terminal.draw(|f| remipn::ui::draw(f, app))?;
 
         match rx.recv().await {
-            Some(event) => {
-                match event {
-                    AppEvent::Input(key) => {
-                        if key.code == KeyCode::Char('c')
-                            && key.modifiers.contains(event::KeyModifiers::CONTROL)
-                        {
-                            return Ok(());
-                        }
-                        if let Some(()) = app.handle_event(AppEvent::Input(key)).await? {
-                            return Ok(());
-                        }
+            Some(event) => match event {
+                AppEvent::Input(key) => {
+                    if key.code == KeyCode::Char('c')
+                        && key.modifiers.contains(event::KeyModifiers::CONTROL)
+                    {
+                        return Ok(());
                     }
-                    _ => {
-                        if let Some(()) = app.handle_event(event).await? {
-                            return Ok(());
-                        }
+                    if let Some(()) = app.handle_event(AppEvent::Input(key)).await? {
+                        return Ok(());
                     }
                 }
-            }
+                _ => {
+                    if let Some(()) = app.handle_event(event).await? {
+                        return Ok(());
+                    }
+                }
+            },
             None => break,
         }
     }
@@ -178,7 +176,9 @@ async fn cmd_list() -> Result<()> {
         .collect();
 
     let mut table = Table::new();
-    table.set_header(vec!["Profile", "Alias", "Category", "Status", "IP", "Since"]);
+    table.set_header(vec![
+        "Profile", "Alias", "Category", "Status", "IP", "Since",
+    ]);
 
     for p in cfg.profiles {
         let conn = connection_map.get(&p.name);
@@ -344,7 +344,11 @@ async fn cmd_connect(name: String) -> Result<()> {
         if let Ok(active) = mgr.get_active_vpns().await {
             for (name, _) in active {
                 if name != profile_name {
-                    println!("{} Closing previous VPN: {}...", " i ".on_blue(), name.yellow());
+                    println!(
+                        "{} Closing previous VPN: {}...",
+                        " i ".on_blue(),
+                        name.yellow()
+                    );
                 }
             }
         }
