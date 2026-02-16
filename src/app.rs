@@ -8,6 +8,7 @@ pub enum AppEvent {
     Tick,
     VpnStatusUpdated,
     Notification(String),
+    SetStatusMessage(String),
 }
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Screen {
@@ -166,6 +167,7 @@ pub struct App {
     pub sort_column: SortColumn,
     pub sort_direction: SortDirection,
     pub alias_input: String,
+    pub event_tx: Option<tokio::sync::mpsc::Sender<AppEvent>>,
 }
 
 impl App {
@@ -195,6 +197,7 @@ impl App {
             sort_column: SortColumn::Name,
             sort_direction: SortDirection::Asc,
             alias_input: String::new(),
+            event_tx: None,
         };
 
         // Initial status load
@@ -206,9 +209,11 @@ impl App {
         match event {
             AppEvent::Input(key) => return self.handle_key(key).await,
             AppEvent::Tick => self.update().await?,
-            AppEvent::VpnStatusUpdated => self.refresh_status().await?,
+            AppEvent::VpnStatusUpdated => self.refresh_from_manager().await?,
             AppEvent::Notification(msg) => {
                 self.add_log(msg.clone());
+            }
+            AppEvent::SetStatusMessage(msg) => {
                 self.set_status_message(msg);
             }
         }
@@ -324,6 +329,15 @@ impl App {
                         .unwrap_or_default();
                     self.screen = Screen::AliasModal;
                     self.input_mode = InputMode::Editing;
+                }
+            }
+            KeyCode::Char('I') => {
+                if let Ok(imported) = self.config.auto_import_profiles() {
+                    if imported {
+                        self.add_log("Manually imported new profiles from standard locations".to_string());
+                    } else {
+                        self.set_status_message("No new profiles found in standard locations".to_string());
+                    }
                 }
             }
             KeyCode::Char('h') | KeyCode::F(1) => {
@@ -557,154 +571,284 @@ impl App {
     }
 
     async fn toggle_connection(&mut self) -> Result<()> {
-        use std::time::Instant;
-        use tokio::time::{Duration, sleep};
-
         let indices = self.get_filtered_profiles_indices();
         if indices.is_empty() || self.selected_profile >= indices.len() {
             return Ok(());
         }
 
         let actual_index = indices[self.selected_profile];
-        // Clone the profile to avoid borrowing conflicts later
         let profile = self.config.profiles[actual_index].clone();
         let profile_name = profile.name.clone();
+        let vpn_manager = self.vpn_manager.clone();
+        let event_tx = self.event_tx.clone();
 
-        match self.vpn_manager.get_status(&profile_name).await {
-            VpnStatus::Connected => {
-                // Show progress and wait until fully disconnected
-                self.set_status_message(format!("Disconnecting from {}...", profile_name));
-                self.add_log(format!("Disconnecting from {}...", profile_name));
-                match self.vpn_manager.disconnect(&profile_name).await {
-                    Ok(_) => {
-                        // Wait for verification of disconnection
+        if event_tx.is_none() {
+            return Ok(());
+        }
+        let event_tx = event_tx.unwrap();
+
+        tokio::spawn(async move {
+            use std::time::Instant;
+            use tokio::time::{Duration, sleep};
+
+            match vpn_manager.get_status(&profile_name).await {
+                VpnStatus::Connected => {
+                    let _ = event_tx
+                        .send(AppEvent::SetStatusMessage(format!(
+                            "Disconnecting from {}...",
+                            profile_name
+                        )))
+                        .await;
+                    let _ = event_tx
+                        .send(AppEvent::Notification(format!(
+                            "Disconnecting from {}...",
+                            profile_name
+                        )))
+                        .await;
+
+                    match vpn_manager.disconnect(&profile_name).await {
+                        Ok(_) => {
+                            let start = Instant::now();
+                            let timeout = Duration::from_secs(20);
+                            loop {
+                                let _ = event_tx.send(AppEvent::VpnStatusUpdated).await;
+                                match vpn_manager.get_status(&profile_name).await {
+                                    VpnStatus::Disconnected => {
+                                        let _ = event_tx
+                                            .send(AppEvent::SetStatusMessage(format!(
+                                                "Disconnected from {}",
+                                                profile_name
+                                            )))
+                                            .await;
+                                        let _ = event_tx
+                                            .send(AppEvent::Notification(format!(
+                                                "Successfully disconnected from {}",
+                                                profile_name
+                                            )))
+                                            .await;
+                                        break;
+                                    }
+                                    VpnStatus::Error(e) => {
+                                        let _ = event_tx
+                                            .send(AppEvent::SetStatusMessage(format!(
+                                                "Disconnect error: {}",
+                                                e
+                                            )))
+                                            .await;
+                                        let _ = event_tx
+                                            .send(AppEvent::Notification(format!(
+                                                "Disconnect error for {}: {}",
+                                                profile_name, e
+                                            )))
+                                            .await;
+                                        break;
+                                    }
+                                    _ => {
+                                        if start.elapsed() > timeout {
+                                            let _ = event_tx
+                                                .send(AppEvent::SetStatusMessage(format!(
+                                                    "Timeout while disconnecting {}",
+                                                    profile_name
+                                                )))
+                                                .await;
+                                            let _ = event_tx
+                                                .send(AppEvent::Notification(format!(
+                                                    "Timeout waiting for disconnection of {}",
+                                                    profile_name
+                                                )))
+                                                .await;
+                                            break;
+                                        }
+                                        sleep(Duration::from_millis(200)).await;
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            let _ = event_tx
+                                .send(AppEvent::SetStatusMessage(format!(
+                                    "Failed to disconnect: {}",
+                                    e
+                                )))
+                                .await;
+                            let _ = event_tx
+                                .send(AppEvent::Notification(format!(
+                                    "Error disconnecting from {}: {}",
+                                    profile_name, e
+                                )))
+                                .await;
+                        }
+                    }
+                }
+                _ => {
+                    let max_retries = 2u32;
+                    let mut attempt: u32 = 0;
+                    let timeout = Duration::from_secs(30);
+
+                    loop {
+                        let _ = event_tx
+                            .send(AppEvent::SetStatusMessage(format!(
+                                "Connecting to {}... (attempt {}/{})",
+                                profile_name,
+                                attempt + 1,
+                                max_retries + 1
+                            )))
+                            .await;
+
+                        // Check for other active VPNs and inform user if we need to disconnect them
+                        if let Ok(active) = vpn_manager.get_active_vpns().await {
+                            for (name, _) in active {
+                                if name != profile_name {
+                                    let _ = event_tx
+                                        .send(AppEvent::SetStatusMessage(format!(
+                                            "Closing previous VPN: {}...",
+                                            name
+                                        )))
+                                        .await;
+                                    let _ = event_tx
+                                        .send(AppEvent::Notification(format!(
+                                            "Closing previous VPN: {}...",
+                                            name
+                                        )))
+                                        .await;
+                                }
+                            }
+                        }
+
+                        let connect_res = vpn_manager.connect(&profile).await;
+
+                        if let Err(e) = connect_res {
+                            let _ = event_tx
+                                .send(AppEvent::Notification(format!(
+                                    "Connect error for {}: {}",
+                                    profile_name, e
+                                )))
+                                .await;
+                            
+                            // If it failed due to a disconnection error, let's update the status and potentially retry
+                            let _ = event_tx.send(AppEvent::SetStatusMessage(format!("Error: {}", e))).await;
+                        }
+
                         let start = Instant::now();
-                        let timeout = Duration::from_secs(20);
+                        let mut connected = false;
                         loop {
-                            self.refresh_status().await.ok();
-                            match self.vpn_manager.get_status(&profile_name).await {
-                                VpnStatus::Disconnected => {
-                                    self.set_status_message(format!(
-                                        "Disconnected from {}",
-                                        profile_name
-                                    ));
-                                    self.add_log(format!(
-                                        "Successfully disconnected from {}",
-                                        profile_name
-                                    ));
+                            let _ = event_tx.send(AppEvent::VpnStatusUpdated).await;
+                            match vpn_manager.get_status(&profile_name).await {
+                                VpnStatus::Connected => {
+                                    connected = true;
                                     break;
                                 }
                                 VpnStatus::Error(e) => {
-                                    self.set_status_message(format!("Disconnect error: {}", e));
-                                    self.add_log(format!(
-                                        "Disconnect error for {}: {}",
-                                        profile_name, e
-                                    ));
+                                    let _ = event_tx
+                                        .send(AppEvent::Notification(format!(
+                                            "Status error while connecting {}: {}",
+                                            profile_name, e
+                                        )))
+                                        .await;
                                     break;
                                 }
                                 _ => {
                                     if start.elapsed() > timeout {
-                                        self.set_status_message(format!(
-                                            "Timeout while disconnecting {}",
-                                            profile_name
-                                        ));
-                                        self.add_log(format!(
-                                            "Timeout waiting for disconnection of {}",
-                                            profile_name
-                                        ));
                                         break;
                                     }
-                                    sleep(Duration::from_secs(1)).await;
+                                    sleep(Duration::from_millis(200)).await;
                                 }
                             }
                         }
-                    }
-                    Err(e) => {
-                        self.set_status_message(format!("Failed to disconnect: {}", e));
-                        self.add_log(format!("Error disconnecting from {}: {}", profile_name, e));
-                    }
-                }
-            }
-            _ => {
-                // The VpnManager::connect implementation already handles disconnecting
-                // other VPNs to ensure single connection.
-                let max_retries = 2u32; // number of additional retries
-                let mut attempt: u32 = 0;
-                let timeout = Duration::from_secs(30);
 
-                loop {
-                    self.set_status_message(format!(
-                        "Connecting to {}... (attempt {}/{})",
-                        profile_name,
-                        attempt + 1,
-                        max_retries + 1
-                    ));
-                    self.add_log(format!(
-                        "Connecting to {}... attempt {}/{}",
-                        profile_name,
-                        attempt + 1,
-                        max_retries + 1
-                    ));
+                        if connected {
+                            // Verify stabilization
+                            let _ = event_tx
+                                .send(AppEvent::SetStatusMessage(format!(
+                                    "Verifying connection to {}...",
+                                    profile_name
+                                )))
+                                .await;
 
-                    let connect_res = self.vpn_manager.connect(&profile).await;
-
-                    if let Err(e) = connect_res {
-                        self.add_log(format!("Connect error for {}: {}", profile_name, e));
-                    }
-
-                    // Wait for verification of the connection
-                    let start = Instant::now();
-                    let mut connected = false;
-                    loop {
-                        self.refresh_status().await.ok();
-                        match self.vpn_manager.get_status(&profile_name).await {
-                            VpnStatus::Connected => {
-                                connected = true;
-                                break;
-                            }
-                            VpnStatus::Error(e) => {
-                                self.add_log(format!(
-                                    "Status error while connecting {}: {}",
-                                    profile_name, e
-                                ));
-                                break;
-                            }
-                            _ => {
-                                if start.elapsed() > timeout {
+                            // Check the status for a few seconds to ensure it stays connected
+                            let mut stable = true;
+                            for _ in 0..15 {
+                                sleep(Duration::from_millis(200)).await;
+                                let _ = event_tx.send(AppEvent::VpnStatusUpdated).await;
+                                
+                                // Ensure our target VPN is still connected
+                                if !matches!(vpn_manager.get_status(&profile_name).await, VpnStatus::Connected) {
+                                    stable = false;
                                     break;
                                 }
-                                sleep(Duration::from_secs(1)).await;
+
+                                if let Ok(active) = vpn_manager.get_active_vpns().await {
+                                    if active.iter().any(|(name, _)| name != &profile_name) {
+                                        let _ = event_tx.send(AppEvent::Notification("Another active VPN detected during stabilization. Ensuring exclusivity...".to_string())).await;
+                                        for (name, _) in active {
+                                            if name != profile_name {
+                                                let _ = vpn_manager.disconnect(&name).await;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            if stable {
+                                let _ = event_tx
+                                    .send(AppEvent::SetStatusMessage(format!(
+                                        "Connected to {}",
+                                        profile_name
+                                    )))
+                                    .await;
+                                let _ = event_tx
+                                    .send(AppEvent::Notification(format!(
+                                        "Successfully connected to {}",
+                                        profile_name
+                                    )))
+                                    .await;
+                                break;
+                            } else {
+                                let _ = event_tx
+                                    .send(AppEvent::Notification(format!(
+                                        "Connection to {} dropped during stabilization",
+                                        profile_name
+                                    )))
+                                    .await;
+                                // Fall through to retry logic
                             }
                         }
-                    }
 
-                    if connected {
-                        self.set_status_message(format!("Connected to {}", profile_name));
-                        self.add_log(format!("Successfully connected to {}", profile_name));
-                        break;
-                    }
+                        if attempt >= max_retries {
+                            let _ = event_tx
+                                .send(AppEvent::SetStatusMessage(format!(
+                                    "Failed to connect to {} after {} attempts",
+                                    profile_name,
+                                    max_retries + 1
+                                )))
+                                .await;
+                            let _ = event_tx
+                                .send(AppEvent::Notification(format!(
+                                    "Failed to connect to {} after {} attempts",
+                                    profile_name,
+                                    max_retries + 1
+                                )))
+                                .await;
+                            break;
+                        }
 
-                    if attempt >= max_retries {
-                        self.set_status_message(format!(
-                            "Failed to connect to {} after {} attempts",
-                            profile_name,
-                            max_retries + 1
-                        ));
-                        self.add_log(format!(
-                            "Failed to connect to {} after {} attempts",
-                            profile_name,
-                            max_retries + 1
-                        ));
-                        break;
+                        attempt += 1;
+                        let _ = vpn_manager
+                            .set_status(&profile_name, VpnStatus::Retrying(attempt, max_retries + 1))
+                            .await;
+                        let _ = event_tx
+                            .send(AppEvent::Notification(format!(
+                                "Retrying connection to {}...",
+                                profile_name
+                            )))
+                            .await;
+                        sleep(Duration::from_millis(500)).await;
                     }
-
-                    attempt += 1;
-                    self.add_log(format!("Retrying connection to {}...", profile_name));
-                    // Small delay before retry
-                    sleep(Duration::from_secs(2)).await;
                 }
             }
-        }
+            let _ = event_tx.send(AppEvent::VpnStatusUpdated).await;
+        });
+
         Ok(())
     }
 
@@ -840,12 +984,12 @@ impl App {
                     let s_a = connections
                         .get(&p_a.name)
                         .map(|c| c.status.as_str())
-                        .unwrap_or("Disconnected");
+                        .unwrap_or_else(|| "Disconnected".to_string());
                     let s_b = connections
                         .get(&p_b.name)
                         .map(|c| c.status.as_str())
-                        .unwrap_or("Disconnected");
-                    s_a.cmp(s_b)
+                        .unwrap_or_else(|| "Disconnected".to_string());
+                    s_a.cmp(&s_b)
                 }
             };
 
@@ -892,14 +1036,16 @@ impl App {
         ));
     }
 
+    async fn refresh_from_manager(&mut self) -> Result<()> {
+        self.connections = self.vpn_manager.get_all_connections().await;
+        Ok(())
+    }
+
     async fn refresh_status(&mut self) -> Result<()> {
-        // self.add_log("Refreshing VPN status...".to_string());
         self.vpn_manager
             .refresh_all_status(&self.config.profiles)
             .await?;
-        self.connections = self.vpn_manager.get_all_connections().await;
-        // self.set_status_message("Status refreshed".to_string());
-        Ok(())
+        self.refresh_from_manager().await
     }
 
     pub async fn update(&mut self) -> Result<()> {

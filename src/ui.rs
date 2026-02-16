@@ -99,6 +99,7 @@ fn draw_vpn_list(f: &mut Frame, app: &App, area: Rect) {
                 .unwrap_or(crate::vpn::VpnStatus::Disconnected);
 
             let status_color = status.color();
+            let status_text = status.as_str();
 
             let connected_time = conn
                 .and_then(|c| c.connected_since)
@@ -119,7 +120,7 @@ fn draw_vpn_list(f: &mut Frame, app: &App, area: Rect) {
                 Cell::from(alias),
                 Cell::from(profile.category.clone()),
                 Cell::from(Span::styled(
-                    status.as_str().to_owned(),
+                    status_text,
                     Style::default().fg(status_color),
                 )),
                 Cell::from(connected_time),
@@ -236,8 +237,14 @@ fn draw_logs_panel(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
-    let status_text = if let Some((msg, _)) = &app.status_message {
-        msg.clone()
+    let now = chrono::Local::now();
+    let status_text = if let Some((msg, timestamp)) = &app.status_message {
+        let age = now.signed_duration_since(*timestamp).num_seconds();
+        if age < 10 {
+            msg.clone()
+        } else {
+            "Ready".to_string()
+        }
     } else {
         "Ready".to_string()
     };
@@ -474,6 +481,7 @@ fn draw_help_screen(f: &mut Frame) {
         Line::from("  x           - Delete selected profile"),
         Line::from("  /           - Search profiles"),
         Line::from("  i           - Import profiles from XML"),
+        Line::from("  I           - Auto-import from standard locations"),
         Line::from(""),
         Line::from(vec![Span::styled(
             "View:",
