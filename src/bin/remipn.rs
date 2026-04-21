@@ -60,7 +60,21 @@ async fn main() -> Result<()> {
         Some(Commands::List) => cmd_list().await,
         Some(Commands::Status { name }) => cmd_status(name).await,
         Some(Commands::Disconnect { name }) => cmd_disconnect(name).await,
-        Some(Commands::Connect { name }) => cmd_connect(name).await,
+        Some(Commands::Connect { name }) => {
+            cmd_connect(name).await?;
+            // Keep process alive if connection was successful (Native Mode)
+            // The engine loop inside VpnManager will keep the interface alive.
+            println!("VPN Tunnel Active (Native). Listening for packets...");
+            // Use a long sleep or wait for a signal
+            let mut sig_int = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+            let mut sig_term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+            
+            tokio::select! {
+                _ = sig_int.recv() => println!("\nShutting down..."),
+                _ = sig_term.recv() => println!("\nTerminated..."),
+            }
+            Ok(())
+        },
     }
 }
 
@@ -70,7 +84,7 @@ async fn run_tui() -> Result<()> {
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(stdout, EnterAlternateScreen, DisableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -287,6 +301,7 @@ fn format_status_cli(status: &remipn::vpn::VpnStatus) -> String {
         VpnStatus::Retrying(a, m) => format!("Retry {}/{}...", a, m).yellow().to_string(),
         VpnStatus::Disconnected => "Disconnected".white().dimmed().to_string(),
         VpnStatus::Disconnecting => "Disconnecting...".yellow().to_string(),
+        VpnStatus::LoginRequired(code) => format!("Login Required (Code: {})", code).yellow().bold().to_string(),
         VpnStatus::Error(e) => format!("Error: {}", e).red().to_string(),
     }
 }
@@ -319,6 +334,7 @@ async fn cmd_disconnect(name: Option<String>) -> Result<()> {
 
 async fn cmd_connect(name: String) -> Result<()> {
     let cfg = Config::load()?;
+    let (tx, mut rx) = mpsc::channel(100);
     let mgr = VpnManager::new();
 
     let profiles = cfg.profiles.clone();
@@ -330,7 +346,18 @@ async fn cmd_connect(name: String) -> Result<()> {
 
     let max_retries = 2u32;
     let mut attempt = 0u32;
-    let timeout = Duration::from_secs(10);
+    let timeout = Duration::from_secs(300); // 5 minutes for login
+
+    // Task to listen for notifications (like login codes)
+    tokio::spawn(async move {
+        while let Some(event) = rx.recv().await {
+            if let AppEvent::Notification(msg) = event {
+                if msg.starts_with("Action required:") || msg.contains("Copiable Code:") {
+                    println!("\n{}", msg.bold().yellow());
+                }
+            }
+        }
+    });
 
     loop {
         println!(
@@ -340,21 +367,7 @@ async fn cmd_connect(name: String) -> Result<()> {
             max_retries + 1
         );
 
-        // Check for other active VPNs and inform user
-        if let Ok(active) = mgr.get_active_vpns().await {
-            for (name, _) in active {
-                if name != profile_name {
-                    println!(
-                        "{} Closing previous VPN: {}...",
-                        " i ".on_blue(),
-                        name.yellow()
-                    );
-                }
-            }
-        }
-
-        // Connection is handled by vpn_manager.connect, but we wrap it in retries
-        let connect_res = mgr.connect(&profile).await;
+        let connect_res = mgr.connect(&profile, Some(tx.clone())).await;
         if let Err(ref e) = connect_res {
             eprintln!("{} Error: {}", " ! ".on_red(), e);
         }
@@ -395,17 +408,6 @@ async fn cmd_connect(name: String) -> Result<()> {
                 ) {
                     stable = false;
                     break;
-                }
-
-                // ensure no other VPN is active
-                if let Ok(active) = mgr.get_active_vpns().await
-                    && active.iter().any(|(name, _)| name != &profile_name)
-                {
-                    for (name, _) in active {
-                        if name != profile_name {
-                            let _ = mgr.disconnect(&name).await;
-                        }
-                    }
                 }
 
                 print!(".");

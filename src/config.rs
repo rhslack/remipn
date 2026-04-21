@@ -1,5 +1,4 @@
 use anyhow::Result;
-use quick_xml::de::from_str;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
@@ -10,7 +9,7 @@ pub struct Config {
     pub settings: Settings,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct VpnProfile {
     pub name: String,
     pub gateway_address: String,
@@ -20,8 +19,39 @@ pub struct VpnProfile {
     pub username: Option<String>,
     #[serde(default)]
     pub aliases: Option<String>,
-    pub protocol: String, // IKEv2, OpenVPN, etc.
+    pub protocol: String, // IKEv2, OpenVPN, WireGuard
     pub auto_connect: bool,
+    // Native IKEv2 fields
+    #[serde(default)]
+    pub server_id: Option<String>,
+    #[serde(default)]
+    pub client_id: Option<String>,
+    #[serde(default)]
+    pub auth_method: Option<String>, // "psk", "certificate"
+    #[serde(default)]
+    pub psk: Option<String>,
+    // Native Azure/OpenVPN fields
+    #[serde(default)]
+    pub tenant: Option<String>,
+    #[serde(default)]
+    pub audience: Option<String>,
+    #[serde(default)]
+    pub issuer: Option<String>,
+    // Native WireGuard fields
+    #[serde(default)]
+    pub private_key_path: Option<String>,
+    #[serde(default)]
+    pub public_key: Option<String>,
+    #[serde(default)]
+    pub preshared_key_path: Option<String>,
+    #[serde(default)]
+    pub endpoint: Option<String>,
+    #[serde(default)]
+    pub allowed_ips: Option<Vec<String>>,
+    #[serde(default)]
+    pub dns: Option<Vec<String>>,
+    #[serde(default)]
+    pub interface_address: Option<String>,
 }
 
 fn default_category() -> String {
@@ -60,6 +90,19 @@ impl Config {
         Ok(home_config_dir.join("config.toml"))
     }
 
+    pub fn load() -> Result<Self> {
+        let config_path = Self::config_path()?;
+        if !config_path.exists() {
+            let default_config = Self::default();
+            default_config.save()?;
+            return Ok(default_config);
+        }
+
+        let contents = fs::read_to_string(config_path)?;
+        let config: Config = toml::from_str(&contents)?;
+        Ok(config)
+    }
+
     pub fn import_dir() -> Result<PathBuf> {
         let import_dir = dirs::home_dir()
             .ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?
@@ -71,39 +114,28 @@ impl Config {
         Ok(import_dir)
     }
 
+    #[cfg(target_os = "macos")]
     pub fn azure_vpn_import_dir() -> Result<PathBuf> {
-        #[cfg(target_os = "macos")]
-        {
-            let azure_dir = dirs::home_dir()
-                .ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?
-                .join("Library/Containers/com.microsoft.AzureVpnMac/Data/Library/Application Support/com.microsoft.AzureVpnMac");
-            Ok(azure_dir)
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            Err(anyhow::anyhow!(
-                "Azure VPN Client path not supported on this OS"
-            ))
-        }
+        let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?;
+        // Standard path for Azure VPN Client profiles on macOS
+        let path = home.join("Library/Containers/com.microsoft.AzureVpnMac/Data/Library/Application Support/com.microsoft.AzureVpnMac");
+        Ok(path)
     }
 
     pub fn auto_import_profiles(&mut self) -> Result<bool> {
         let mut imported_any = false;
 
         // Import from default import dir
-        if let Ok(import_dir) = Self::import_dir()
-            && self.import_from_dir(&import_dir)?
-        {
-            imported_any = true;
+        if let Ok(import_dir) = Self::import_dir() {
+             if import_dir.exists() && self.import_from_dir(&import_dir)? {
+                imported_any = true;
+             }
         }
 
         // Import from Azure VPN Client dir on macOS
         #[cfg(target_os = "macos")]
-        {
-            if let Ok(azure_dir) = Self::azure_vpn_import_dir()
-                && azure_dir.exists()
-                && self.import_from_dir(&azure_dir)?
-            {
+        if let Ok(azure_dir) = Self::azure_vpn_import_dir() {
+            if azure_dir.exists() && self.import_from_dir(&azure_dir)? {
                 imported_any = true;
             }
         }
@@ -128,12 +160,17 @@ impl Config {
                         || extension == Some("azvpn")
                     {
                         let content = fs::read_to_string(&path)?;
-                        if let Ok(new_profiles) = Self::import_from_xml(&content) {
-                            for np in new_profiles {
-                                if !self.profiles.iter().any(|p| p.name == np.name) {
-                                    self.profiles.push(np);
-                                    imported_any = true;
+                        match Self::import_from_xml(&content) {
+                            Ok(new_profiles) => {
+                                for profile in new_profiles {
+                                    if !self.profiles.iter().any(|p| p.name == profile.name) {
+                                        self.profiles.push(profile);
+                                        imported_any = true;
+                                    }
                                 }
+                            }
+                            Err(e) => {
+                                eprintln!("Error importing from {:?}: {}", path, e);
                             }
                         }
                     }
@@ -141,20 +178,6 @@ impl Config {
             }
         }
         Ok(imported_any)
-    }
-
-    pub fn load() -> Result<Self> {
-        let config_path = Self::config_path()?;
-
-        if !config_path.exists() {
-            let default_config = Self::default();
-            default_config.save()?;
-            return Ok(default_config);
-        }
-
-        let contents = fs::read_to_string(config_path)?;
-        let config: Config = toml::from_str(&contents)?;
-        Ok(config)
     }
 
     pub fn save(&self) -> Result<()> {
@@ -165,154 +188,59 @@ impl Config {
     }
 
     pub fn import_from_xml(xml_content: &str) -> Result<Vec<VpnProfile>> {
-        #[derive(Debug, Deserialize)]
-        struct VpnProfileXml {
-            #[serde(rename = "Name")]
-            name: Option<String>,
-            #[serde(rename = "name")]
-            name_lower: Option<String>,
-            #[serde(rename = "Server")]
-            server: Option<String>,
-            #[serde(rename = "fqdn")]
-            fqdn: Option<String>,
-            #[serde(rename = "Protocol")]
-            protocol: Option<String>,
-        }
+        let mut manual_profiles = Vec::new();
+        
+        let re_profile = regex::Regex::new(r"(?s)<(?:\w+:)?(?:AzVpnProfile|VpnProfile).*?>.*?</(?:\w+:)?(?:AzVpnProfile|VpnProfile)>").unwrap();
+        let re_name = regex::Regex::new(r"<(?:\w+:)?(?:Name|name)>(.*?)</(?:\w+:)?(?:Name|name)>").unwrap();
+        let re_server = regex::Regex::new(r"<(?:\w+:)?(?:Server|fqdn|displayname)>(.*?)</(?:\w+:)?(?:Server|fqdn|displayname)>").unwrap();
+        let re_protocol = regex::Regex::new(r"<(?:\w+:)?(?:Protocol|transportprotocol)>(.*?)</(?:\w+:)?(?:Protocol|transportprotocol)>").unwrap();
+        let re_auth = regex::Regex::new(r"<(?:\w+:)?AuthenticationMethod>(.*?)</(?:\w+:)?AuthenticationMethod>").unwrap();
+        let re_psk = regex::Regex::new(r"<(?:\w+:)?SharedKey>(.*?)</(?:\w+:)?SharedKey>").unwrap();
+        let re_remote = regex::Regex::new(r"<(?:\w+:)?RemoteId>(.*?)</(?:\w+:)?RemoteId>").unwrap();
+        let re_local = regex::Regex::new(r"<(?:\w+:)?LocalId>(.*?)</(?:\w+:)?LocalId>").unwrap();
+        let re_tenant = regex::Regex::new(r"<(?:\w+:)?tenant>(.*?)</(?:\w+:)?tenant>").unwrap();
+        let re_audience = regex::Regex::new(r"<(?:\w+:)?audience>(.*?)</(?:\w+:)?audience>").unwrap();
+        let re_issuer = regex::Regex::new(r"<(?:\w+:)?issuer>(.*?)</(?:\w+:)?issuer>").unwrap();
+        let re_dns = regex::Regex::new(r"<(?:\w+:)?dnsserver>(.*?)</(?:\w+:)?dnsserver>").unwrap();
 
-        #[derive(Debug, Deserialize)]
-        struct AzVpnProfileXml {
-            #[serde(rename = "VpnProfile", default)]
-            profiles: Vec<VpnProfileXml>,
-        }
+        for cap in re_profile.find_iter(xml_content) {
+            let section = cap.as_str();
+            let name = re_name.captures(section).map(|c| c[1].to_string());
+            let server = re_server.captures(section).map(|c| c[1].to_string());
+            let mut protocol_str = re_protocol.captures(section).map(|c| c[1].to_string());
+            
+            let tenant = re_tenant.captures(section).map(|c| c[1].to_string());
+            let dns_servers: Vec<String> = re_dns.captures_iter(section).map(|c| c[1].to_string()).collect();
 
-        #[derive(Debug, Deserialize)]
-        struct VpnSettingsXml {
-            #[serde(rename = "VpnProfile", default)]
-            profiles: Vec<VpnProfileXml>,
-        }
-
-        // Try parsing AzVpnProfile first, then fallback to simple VpnSettings,
-        // and finally try to parse as a single VpnProfile
-        let profiles = if xml_content.contains("<AzVpnProfile") {
-            if let Ok(az_settings) = from_str::<AzVpnProfileXml>(xml_content) {
-                az_settings.profiles
-            } else {
-                // Try parsing the root as a single profile if it has AzVpnProfile tag
-                if let Ok(single_profile) = from_str::<VpnProfileXml>(xml_content) {
-                    vec![single_profile]
-                } else {
-                    vec![]
-                }
-            }
-        } else if xml_content.contains("<VpnSettings") {
-            if let Ok(settings) = from_str::<VpnSettingsXml>(xml_content) {
-                settings.profiles
-            } else {
-                vec![]
-            }
-        } else if xml_content.contains("<VpnProfile") {
-            if let Ok(single_profile) = from_str::<VpnProfileXml>(xml_content) {
-                vec![single_profile]
-            } else {
-                vec![]
-            }
-        } else {
-            let mut manual_profiles = Vec::new();
-
-            // Extract all <VpnProfile> sections manually (case-insensitive tags if possible, but keeping it simple)
-            let re_profile = regex::Regex::new(r"(?s)<(?:\w+:)?(?:AzVpnProfile|VpnProfile).*?>.*?</(?:\w+:)?(?:AzVpnProfile|VpnProfile)>").unwrap();
-            let re_name =
-                regex::Regex::new(r"<(?:\w+:)?(?:Name|name)>(.*?)</(?:\w+:)?(?:Name|name)>")
-                    .unwrap();
-            let re_server = regex::Regex::new(r"<(?:\w+:)?(?:Server|fqdn|displayname)>(.*?)</(?:\w+:)?(?:Server|fqdn|displayname)>").unwrap();
-            let re_protocol = regex::Regex::new(r"<(?:\w+:)?(?:Protocol|transportprotocol)>(.*?)</(?:\w+:)?(?:Protocol|transportprotocol)>").unwrap();
-
-            for cap in re_profile.find_iter(xml_content) {
-                let section = cap.as_str();
-                let name = re_name.captures(section).map(|c| c[1].to_string());
-                let server = re_server.captures(section).map(|c| c[1].to_string());
-                let protocol = re_protocol.captures(section).map(|c| c[1].to_string());
-
-                if let (Some(n), Some(s)) = (name, server) {
-                    manual_profiles.push(VpnProfile {
-                        name: n,
-                        gateway_address: s,
-                        category: "Uncategorized".to_string(),
-                        cert_path: None,
-                        username: None,
-                        aliases: None,
-                        protocol: protocol.unwrap_or_else(|| "IKEv2".to_string()),
-                        auto_connect: false,
-                    });
-                }
+            if tenant.is_some() || xml_content.contains("<aad>") {
+                protocol_str = Some("OpenVPN".to_string());
+            } else if xml_content.contains("IKEv2") || xml_content.contains("VpnServerType") {
+                protocol_str = Some("IKEv2".to_string());
             }
 
-            if !manual_profiles.is_empty() {
-                return Ok(manual_profiles);
-            }
-
-            return Err(anyhow::anyhow!("Unsupported XML format or parsing error"));
-        };
-
-        if profiles.is_empty()
-            && (xml_content.contains("VpnProfile") || xml_content.contains("AzVpnProfile"))
-        {
-            // The second attempt if structured parsing returned empty
-            let mut manual_profiles = Vec::new();
-
-            let re_profile = regex::Regex::new(r"(?s)<(?:\w+:)?(?:AzVpnProfile|VpnProfile).*?>.*?</(?:\w+:)?(?:AzVpnProfile|VpnProfile)>").unwrap();
-            let re_name =
-                regex::Regex::new(r"<(?:\w+:)?(?:Name|name)>(.*?)</(?:\w+:)?(?:Name|name)>")
-                    .unwrap();
-            let re_server = regex::Regex::new(r"<(?:\w+:)?(?:Server|fqdn|displayname)>(.*?)</(?:\w+:)?(?:Server|fqdn|displayname)>").unwrap();
-            let re_protocol = regex::Regex::new(r"<(?:\w+:)?(?:Protocol|transportprotocol)>(.*?)</(?:\w+:)?(?:Protocol|transportprotocol)>").unwrap();
-
-            for cap in re_profile.find_iter(xml_content) {
-                let section = cap.as_str();
-                let name = re_name.captures(section).map(|c| c[1].to_string());
-                let server = re_server.captures(section).map(|c| c[1].to_string());
-                let protocol = re_protocol.captures(section).map(|c| c[1].to_string());
-
-                if let (Some(n), Some(s)) = (name, server) {
-                    manual_profiles.push(VpnProfile {
-                        name: n,
-                        gateway_address: s,
-                        category: "Uncategorized".to_string(),
-                        cert_path: None,
-                        username: None,
-                        aliases: None,
-                        protocol: protocol.unwrap_or_else(|| "IKEv2".to_string()),
-                        auto_connect: false,
-                    });
-                }
-            }
-
-            if !manual_profiles.is_empty() {
-                return Ok(manual_profiles);
+            if let (Some(n), Some(s)) = (name, server) {
+                manual_profiles.push(VpnProfile {
+                    name: n,
+                    gateway_address: s,
+                    protocol: protocol_str.unwrap_or_else(|| "OpenVPN".to_string()),
+                    auth_method: re_auth.captures(section).map(|c| c[1].to_string()),
+                    psk: re_psk.captures(section).map(|c| c[1].to_string()),
+                    server_id: re_remote.captures(section).map(|c| c[1].to_string()),
+                    client_id: re_local.captures(section).map(|c| c[1].to_string()),
+                    tenant,
+                    audience: re_audience.captures(section).map(|c| c[1].to_string()),
+                    issuer: re_issuer.captures(section).map(|c| c[1].to_string()),
+                    dns: if dns_servers.is_empty() { None } else { Some(dns_servers) },
+                    ..Default::default()
+                });
             }
         }
 
-        let mut vpn_profiles = Vec::new();
-        for p in profiles {
-            let name = p
-                .name
-                .or(p.name_lower)
-                .unwrap_or_else(|| "Unnamed".to_string());
-            let server = p.server.or(p.fqdn).unwrap_or_else(|| "unknown".to_string());
-
-            vpn_profiles.push(VpnProfile {
-                name,
-                gateway_address: server,
-                category: "Uncategorized".to_string(),
-                cert_path: None,
-                username: None,
-                aliases: None,
-                protocol: p.protocol.unwrap_or_else(|| "IKEv2".to_string()),
-                auto_connect: false,
-            });
+        if !manual_profiles.is_empty() {
+            return Ok(manual_profiles);
         }
 
-        Ok(vpn_profiles)
+        Ok(vec![])
     }
 }
 
@@ -325,9 +253,8 @@ impl Default for Config {
                 category: "prod".to_string(),
                 cert_path: Some("/path/to/cert.pem".to_string()),
                 username: Some("user@example.com".to_string()),
-                aliases: Some("example".to_string()),
-                protocol: "IKEv2".to_string(),
-                auto_connect: false,
+                protocol: "OpenVPN".to_string(),
+                ..Default::default()
             }],
             settings: Settings::default(),
         }

@@ -193,7 +193,7 @@ impl App {
             last_update: std::time::Instant::now(),
             file_browser: None,
             search_query: String::new(),
-            add_profile_data: vec![String::new(); 6],
+            add_profile_data: vec![String::new(); 7],
             sort_column: SortColumn::Name,
             sort_direction: SortDirection::Asc,
             alias_input: String::new(),
@@ -211,7 +211,35 @@ impl App {
             AppEvent::Tick => self.update().await?,
             AppEvent::VpnStatusUpdated => self.refresh_from_manager().await?,
             AppEvent::Notification(msg) => {
-                self.add_log(msg.clone());
+                if msg.starts_with("STATUS_UPDATE:") {
+                    let parts: Vec<&str> = msg.split(':').collect();
+                    if parts.len() >= 3 {
+                        let profile_name = parts[1].to_string();
+                        let status_type = parts[2];
+                        {
+                            let mut conns = self.vpn_manager.connections.write().await;
+                            if let Some(conn) = conns.get_mut(&profile_name) {
+                                match status_type {
+                                    "LoginRequired" => {
+                                        if parts.len() >= 4 {
+                                            conn.status = VpnStatus::LoginRequired(parts[3].to_string());
+                                        }
+                                    }
+                                    "Connected" => {
+                                        conn.status = VpnStatus::Connected;
+                                        conn.connected_since = Some(chrono::Local::now());
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                        if status_type == "LoginRequired" && parts.len() >= 4 {
+                            self.add_log(format!("Action required: Login code for {} is {}", profile_name, parts[3]));
+                        }
+                    }
+                } else {
+                    self.add_log(msg.clone());
+                }
             }
             AppEvent::SetStatusMessage(msg) => {
                 self.set_status_message(msg);
@@ -283,7 +311,7 @@ impl App {
             KeyCode::Char('n') => {
                 self.screen = Screen::AddProfile;
                 self.input_mode = InputMode::Editing;
-                self.add_profile_data = vec![String::new(); 6];
+                self.add_profile_data = vec![String::new(); 7];
                 self.input_field = 0;
             }
             KeyCode::Char('e') => {
@@ -315,6 +343,29 @@ impl App {
             }
             KeyCode::Char('l') => {
                 self.show_logs = !self.show_logs;
+            }
+            KeyCode::Char('c') => {
+                if let Some(last_log) = self.logs.last() {
+                    // Try to find a code in the format "Copiable Code: XXXX-XXXX" or similar
+                    let content = if last_log.contains("Copiable Code: ") {
+                        last_log.split("Copiable Code: ").nth(1).unwrap_or(last_log)
+                    } else if last_log.starts_with('[') && last_log.contains("] ") {
+                        last_log.splitn(2, "] ").nth(1).unwrap_or(last_log)
+                    } else {
+                        last_log
+                    };
+                    
+                    match arboard::Clipboard::new() {
+                        Ok(mut clipboard) => {
+                            if let Err(e) = clipboard.set_text(content.to_string()) {
+                                self.set_status_message(format!("Clipboard error: {}", e));
+                            } else {
+                                self.set_status_message("Last log copied to clipboard".to_string());
+                            }
+                        }
+                        Err(e) => self.set_status_message(format!("Clipboard init error: {}", e)),
+                    }
+                }
             }
             KeyCode::Char('s') => {
                 self.cycle_sort();
@@ -369,7 +420,7 @@ impl App {
                 self.save_new_profile()?;
             }
             KeyCode::Tab => {
-                self.input_field = (self.input_field + 1) % 6;
+                self.input_field = (self.input_field + 1) % 7;
                 // Skip the name field (index 0) if editing
                 if self.screen == Screen::EditProfile && self.input_field == 0 {
                     self.input_field = 1;
@@ -377,13 +428,13 @@ impl App {
             }
             KeyCode::BackTab => {
                 self.input_field = if self.input_field == 0 {
-                    5
+                    6
                 } else {
                     self.input_field - 1
                 };
                 // Skip the name field (index 0) if editing
                 if self.screen == Screen::EditProfile && self.input_field == 0 {
-                    self.input_field = 5;
+                    self.input_field = 6;
                 }
             }
             KeyCode::Char(c) => {
@@ -589,7 +640,7 @@ impl App {
         if event_tx.is_none() {
             return Ok(());
         }
-        let event_tx = event_tx.unwrap();
+        let event_tx_val = event_tx.clone().unwrap();
 
         tokio::spawn(async move {
             use std::time::Instant;
@@ -597,13 +648,13 @@ impl App {
 
             match vpn_manager.get_status(&profile_name).await {
                 VpnStatus::Connected => {
-                    let _ = event_tx
+                    let _ = event_tx_val
                         .send(AppEvent::SetStatusMessage(format!(
                             "Disconnecting from {}...",
                             profile_name
                         )))
                         .await;
-                    let _ = event_tx
+                    let _ = event_tx_val
                         .send(AppEvent::Notification(format!(
                             "Disconnecting from {}...",
                             profile_name
@@ -615,16 +666,16 @@ impl App {
                             let start = Instant::now();
                             let timeout = Duration::from_secs(20);
                             loop {
-                                let _ = event_tx.send(AppEvent::VpnStatusUpdated).await;
+                                let _ = event_tx_val.send(AppEvent::VpnStatusUpdated).await;
                                 match vpn_manager.get_status(&profile_name).await {
                                     VpnStatus::Disconnected => {
-                                        let _ = event_tx
+                                        let _ = event_tx_val
                                             .send(AppEvent::SetStatusMessage(format!(
                                                 "Disconnected from {}",
                                                 profile_name
                                             )))
                                             .await;
-                                        let _ = event_tx
+                                        let _ = event_tx_val
                                             .send(AppEvent::Notification(format!(
                                                 "Successfully disconnected from {}",
                                                 profile_name
@@ -633,13 +684,13 @@ impl App {
                                         break;
                                     }
                                     VpnStatus::Error(e) => {
-                                        let _ = event_tx
+                                        let _ = event_tx_val
                                             .send(AppEvent::SetStatusMessage(format!(
                                                 "Disconnect error: {}",
                                                 e
                                             )))
                                             .await;
-                                        let _ = event_tx
+                                        let _ = event_tx_val
                                             .send(AppEvent::Notification(format!(
                                                 "Disconnect error for {}: {}",
                                                 profile_name, e
@@ -649,13 +700,13 @@ impl App {
                                     }
                                     _ => {
                                         if start.elapsed() > timeout {
-                                            let _ = event_tx
+                                            let _ = event_tx_val
                                                 .send(AppEvent::SetStatusMessage(format!(
                                                     "Timeout while disconnecting {}",
                                                     profile_name
                                                 )))
                                                 .await;
-                                            let _ = event_tx
+                                            let _ = event_tx_val
                                                 .send(AppEvent::Notification(format!(
                                                     "Timeout waiting for disconnection of {}",
                                                     profile_name
@@ -669,13 +720,13 @@ impl App {
                             }
                         }
                         Err(e) => {
-                            let _ = event_tx
+                            let _ = event_tx_val
                                 .send(AppEvent::SetStatusMessage(format!(
                                     "Failed to disconnect: {}",
                                     e
                                 )))
                                 .await;
-                            let _ = event_tx
+                            let _ = event_tx_val
                                 .send(AppEvent::Notification(format!(
                                     "Error disconnecting from {}: {}",
                                     profile_name, e
@@ -687,10 +738,10 @@ impl App {
                 _ => {
                     let max_retries = 2u32;
                     let mut attempt: u32 = 0;
-                    let timeout = Duration::from_secs(30);
+                    let timeout = Duration::from_secs(300); // Aumento timeout per login manuale
 
                     loop {
-                        let _ = event_tx
+                        let _ = event_tx_val
                             .send(AppEvent::SetStatusMessage(format!(
                                 "Connecting to {}... (attempt {}/{})",
                                 profile_name,
@@ -699,38 +750,17 @@ impl App {
                             )))
                             .await;
 
-                        // Check for other active VPNs and inform user if we need to disconnect them
-                        if let Ok(active) = vpn_manager.get_active_vpns().await {
-                            for (name, _) in active {
-                                if name != profile_name {
-                                    let _ = event_tx
-                                        .send(AppEvent::SetStatusMessage(format!(
-                                            "Closing previous VPN: {}...",
-                                            name
-                                        )))
-                                        .await;
-                                    let _ = event_tx
-                                        .send(AppEvent::Notification(format!(
-                                            "Closing previous VPN: {}...",
-                                            name
-                                        )))
-                                        .await;
-                                }
-                            }
-                        }
-
-                        let connect_res = vpn_manager.connect(&profile).await;
+                        let connect_res = vpn_manager.connect(&profile, event_tx.clone()).await;
 
                         if let Err(e) = connect_res {
-                            let _ = event_tx
+                            let _ = event_tx_val
                                 .send(AppEvent::Notification(format!(
                                     "Connect error for {}: {}",
                                     profile_name, e
                                 )))
                                 .await;
 
-                            // If it failed due to a disconnection error, let's update the status and potentially retry
-                            let _ = event_tx
+                            let _ = event_tx_val
                                 .send(AppEvent::SetStatusMessage(format!("Error: {}", e)))
                                 .await;
                         }
@@ -738,14 +768,14 @@ impl App {
                         let start = Instant::now();
                         let mut connected = false;
                         loop {
-                            let _ = event_tx.send(AppEvent::VpnStatusUpdated).await;
+                            let _ = event_tx_val.send(AppEvent::VpnStatusUpdated).await;
                             match vpn_manager.get_status(&profile_name).await {
                                 VpnStatus::Connected => {
                                     connected = true;
                                     break;
                                 }
                                 VpnStatus::Error(e) => {
-                                    let _ = event_tx
+                                    let _ = event_tx_val
                                         .send(AppEvent::Notification(format!(
                                             "Status error while connecting {}: {}",
                                             profile_name, e
@@ -757,82 +787,30 @@ impl App {
                                     if start.elapsed() > timeout {
                                         break;
                                     }
-                                    sleep(Duration::from_millis(200)).await;
+                                    sleep(Duration::from_millis(500)).await;
                                 }
                             }
                         }
 
                         if connected {
-                            // Verify stabilization
-                            let _ = event_tx
+                            let _ = event_tx_val
                                 .send(AppEvent::SetStatusMessage(format!(
-                                    "Verifying connection to {}...",
+                                    "Connected to {}",
                                     profile_name
                                 )))
                                 .await;
-
-                            // Check the status for a few seconds to ensure it stays connected
-                            let mut stable = true;
-                            for _ in 0..15 {
-                                sleep(Duration::from_millis(200)).await;
-                                let _ = event_tx.send(AppEvent::VpnStatusUpdated).await;
-
-                                // Ensure our target VPN is still connected
-                                if !matches!(
-                                    vpn_manager.get_status(&profile_name).await,
-                                    VpnStatus::Connected
-                                ) {
-                                    stable = false;
-                                    break;
-                                }
-
-                                if let Ok(active) = vpn_manager.get_active_vpns().await
-                                    && active.iter().any(|(name, _)| name != &profile_name)
-                                {
-                                    let _ = event_tx.send(AppEvent::Notification("Another active VPN detected during stabilization. Ensuring exclusivity...".to_string())).await;
-                                    for (name, _) in active {
-                                        if name != profile_name {
-                                            let _ = vpn_manager.disconnect(&name).await;
-                                        }
-                                    }
-                                }
-                            }
-
-                            if stable {
-                                let _ = event_tx
-                                    .send(AppEvent::SetStatusMessage(format!(
-                                        "Connected to {}",
-                                        profile_name
-                                    )))
-                                    .await;
-                                let _ = event_tx
-                                    .send(AppEvent::Notification(format!(
-                                        "Successfully connected to {}",
-                                        profile_name
-                                    )))
-                                    .await;
-                                break;
-                            } else {
-                                let _ = event_tx
-                                    .send(AppEvent::Notification(format!(
-                                        "Connection to {} dropped during stabilization",
-                                        profile_name
-                                    )))
-                                    .await;
-                                // Fall through to retry logic
-                            }
+                            let _ = event_tx_val
+                                .send(AppEvent::Notification(format!(
+                                    "Successfully connected to {}",
+                                    profile_name
+                                )))
+                                .await;
+                            break;
                         }
 
                         if attempt >= max_retries {
-                            let _ = event_tx
+                            let _ = event_tx_val
                                 .send(AppEvent::SetStatusMessage(format!(
-                                    "Failed to connect to {} after {} attempts",
-                                    profile_name,
-                                    max_retries + 1
-                                )))
-                                .await;
-                            let _ = event_tx
-                                .send(AppEvent::Notification(format!(
                                     "Failed to connect to {} after {} attempts",
                                     profile_name,
                                     max_retries + 1
@@ -848,17 +826,11 @@ impl App {
                                 VpnStatus::Retrying(attempt, max_retries + 1),
                             )
                             .await;
-                        let _ = event_tx
-                            .send(AppEvent::Notification(format!(
-                                "Retrying connection to {}...",
-                                profile_name
-                            )))
-                            .await;
-                        sleep(Duration::from_millis(500)).await;
+                        sleep(Duration::from_millis(1000)).await;
                     }
                 }
             }
-            let _ = event_tx.send(AppEvent::VpnStatusUpdated).await;
+            let _ = event_tx_val.send(AppEvent::VpnStatusUpdated).await;
         });
 
         Ok(())
@@ -890,8 +862,14 @@ impl App {
             } else {
                 Some(self.add_profile_data[5].clone())
             },
-            protocol: "IKEv2".to_string(),
+            protocol: if self.add_profile_data[6].is_empty() {
+                "OpenVPN".to_string()
+            } else {
+                let p = self.add_profile_data[6].to_uppercase();
+                if p == "IKE" || p == "IKE2" { "IKEv2".to_string() } else { p }
+            },
             auto_connect: false,
+            ..Default::default()
         };
 
         let is_edit = self.screen == Screen::EditProfile;
@@ -953,6 +931,7 @@ impl App {
             self.add_profile_data[3] = profile.cert_path.clone().unwrap_or_default();
             self.add_profile_data[4] = profile.username.clone().unwrap_or_default();
             self.add_profile_data[5] = profile.aliases.clone().unwrap_or_default();
+            self.add_profile_data[6] = profile.protocol.clone();
             self.input_field = 0;
         }
     }

@@ -1,14 +1,19 @@
 use crate::config::VpnProfile;
-use anyhow::{Result, anyhow};
-use async_process::Command;
+use crate::engine::wireguard::WireGuardEngine;
+use crate::engine::ikev2::IkeEngine;
+use crate::engine::openvpn::OpenVpnEngine;
+use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, mpsc};
+
+pub use crate::app::AppEvent;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum VpnStatus {
     Connected,
     Connecting,
+    LoginRequired(String), // Nuova variante per gestire il login da GUI
     Retrying(u32, u32),
     Disconnected,
     Disconnecting,
@@ -20,6 +25,7 @@ impl VpnStatus {
         match self {
             VpnStatus::Connected => "Connected".to_string(),
             VpnStatus::Connecting => "Connecting...".to_string(),
+            VpnStatus::LoginRequired(_) => "Login Required".to_string(),
             VpnStatus::Retrying(a, m) => format!("Retry {}/{}...", a, m),
             VpnStatus::Disconnected => "Disconnected".to_string(),
             VpnStatus::Disconnecting => "Disconnecting...".to_string(),
@@ -30,7 +36,7 @@ impl VpnStatus {
     pub fn color(&self) -> ratatui::style::Color {
         match self {
             VpnStatus::Connected => ratatui::style::Color::Green,
-            VpnStatus::Connecting | VpnStatus::Retrying(_, _) => ratatui::style::Color::Yellow,
+            VpnStatus::Connecting | VpnStatus::Retrying(_, _) | VpnStatus::LoginRequired(_) => ratatui::style::Color::Yellow,
             VpnStatus::Disconnected => ratatui::style::Color::Gray,
             VpnStatus::Disconnecting => ratatui::style::Color::Yellow,
             VpnStatus::Error(_) => ratatui::style::Color::Red,
@@ -50,49 +56,36 @@ pub struct VpnConnection {
 
 #[derive(Debug, Clone)]
 pub struct VpnManager {
-    connections: Arc<RwLock<HashMap<String, VpnConnection>>>,
+    pub connections: Arc<RwLock<HashMap<String, VpnConnection>>>,
+    pub stop_channels: Arc<RwLock<HashMap<String, mpsc::Sender<()>>>>,
 }
 
 impl VpnManager {
     pub fn new() -> Self {
         Self {
             connections: Arc::new(RwLock::new(HashMap::new())),
+            stop_channels: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
-    /// Connect to an Azure VPN using the profile configuration
-    pub async fn connect(&self, profile: &VpnProfile) -> Result<()> {
+    /// Connect to a VPN using the native engine
+    pub async fn connect(&self, profile: &VpnProfile, event_tx: Option<mpsc::Sender<crate::app::AppEvent>>) -> Result<()> {
         // Disconnect all other VPNs first (Single connection requirement)
-        let active_vpns = self.get_active_vpns().await?;
-        for (name, _) in active_vpns {
+        let active_profiles: Vec<String> = {
+            let conns = self.connections.read().await;
+            conns.iter()
+                .filter(|(_, c)| matches!(c.status, VpnStatus::Connected | VpnStatus::Connecting))
+                .map(|(name, _)| name.clone())
+                .collect()
+        };
+
+        for name in active_profiles {
             if name != profile.name {
                 let _ = self.disconnect(&name).await;
-
-                // Wait for it to be effectively disconnected
-                let mut disconnected = false;
-                // Give the system a moment to start the disconnection process
-                tokio::time::sleep(tokio::time::Duration::from_millis(800)).await;
-
-                for _ in 0..40 {
-                    let sys_status = self.get_system_status(&name).await;
-                    if matches!(sys_status, VpnStatus::Disconnected) {
-                        disconnected = true;
-                        break;
-                    }
-                    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
-                }
-                if !disconnected {
-                    return Err(anyhow!(
-                        "Failed to disconnect previous VPN: {}. Current state still not Disconnected.",
-                        name
-                    ));
-                }
             }
         }
 
         let mut connections = self.connections.write().await;
-
-        // Update status to connecting
         connections.insert(
             profile.name.clone(),
             VpnConnection {
@@ -106,55 +99,102 @@ impl VpnManager {
         );
         drop(connections);
 
-        // Execute Azure VPN connection command
-        let result = self.execute_vpn_connect(profile).await;
+        let (stop_tx, mut stop_rx) = mpsc::channel(1);
+        self.stop_channels.write().await.insert(profile.name.clone(), stop_tx);
 
-        let mut connections = self.connections.write().await;
-        match result {
-            Ok(_) => {
-                if let Some(conn) = connections.get_mut(&profile.name) {
-                    conn.status = VpnStatus::Connected;
-                    conn.connected_since = Some(chrono::Local::now());
+        let profile_clone = profile.clone();
+        let manager_clone = self.connections.clone();
+        let stop_channels_clone = self.stop_channels.clone();
+        let profile_name = profile.name.clone();
+        let event_tx_clone = event_tx.clone();
+        
+        tokio::spawn(async move {
+            let protocol = profile_clone.protocol.to_lowercase();
+            
+            if protocol == "wireguard" || protocol == "openvpn" || protocol == "ikev2" {
+                // Iniziamo come Connecting
+                {
+                    let mut conns = manager_clone.write().await;
+                    if let Some(conn) = conns.get_mut(&profile_name) {
+                        conn.status = VpnStatus::Connecting;
+                    }
                 }
             }
-            Err(e) => {
-                if let Some(conn) = connections.get_mut(&profile.name) {
-                    conn.status = VpnStatus::Error(e.to_string());
+
+            if protocol == "wireguard" {
+                let engine = WireGuardEngine::new(profile_clone, event_tx_clone);
+                tokio::select! {
+                    res = engine.run() => {
+                        if let Err(e) = res {
+                            let mut conns = manager_clone.write().await;
+                            if let Some(conn) = conns.get_mut(&profile_name) {
+                                conn.status = VpnStatus::Error(e.to_string());
+                            }
+                        }
+                    }
+                    _ = stop_rx.recv() => {}
                 }
-                return Err(e);
+            } else if protocol == "ikev2" {
+                let engine = IkeEngine::new(profile_clone, event_tx_clone);
+                tokio::select! {
+                    res = engine.run() => {
+                        if let Err(e) = res {
+                            let mut conns = manager_clone.write().await;
+                            if let Some(conn) = conns.get_mut(&profile_name) {
+                                conn.status = VpnStatus::Error(e.to_string());
+                            }
+                        }
+                    }
+                    _ = stop_rx.recv() => {}
+                }
+            } else if protocol == "openvpn" {
+                let engine = OpenVpnEngine::new(profile_clone, event_tx_clone);
+                tokio::select! {
+                    res = engine.run() => {
+                        if let Err(e) = res {
+                            let mut conns = manager_clone.write().await;
+                            if let Some(conn) = conns.get_mut(&profile_name) {
+                                conn.status = VpnStatus::Error(e.to_string());
+                            }
+                        }
+                    }
+                    _ = stop_rx.recv() => {}
+                }
+            } else {
+                let mut conns = manager_clone.write().await;
+                if let Some(conn) = conns.get_mut(&profile_name) {
+                    conn.status = VpnStatus::Error(format!("Unsupported protocol: {}", protocol));
+                }
             }
-        }
+
+            // Cleanup
+            let mut conns = manager_clone.write().await;
+            if let Some(conn) = conns.get_mut(&profile_name) {
+                if !matches!(conn.status, VpnStatus::Error(_)) {
+                    conn.status = VpnStatus::Disconnected;
+                }
+                conn.connected_since = None;
+            }
+            stop_channels_clone.write().await.remove(&profile_name);
+        });
 
         Ok(())
     }
 
     /// Disconnect from a VPN
     pub async fn disconnect(&self, profile_name: &str) -> Result<()> {
-        let mut connections = self.connections.write().await;
-
-        if let Some(conn) = connections.get_mut(profile_name) {
-            conn.status = VpnStatus::Disconnecting;
+        let mut stop_channels = self.stop_channels.write().await;
+        if let Some(stop_tx) = stop_channels.remove(profile_name) {
+            let _ = stop_tx.send(()).await;
         }
-        drop(connections);
-
-        // Execute disconnect command
-        let result = self.execute_vpn_disconnect(profile_name).await;
 
         let mut connections = self.connections.write().await;
-        match result {
-            Ok(_) => {
-                if let Some(conn) = connections.get_mut(profile_name) {
-                    conn.status = VpnStatus::Disconnected;
-                    conn.connected_since = None;
-                    conn.ip_address = None;
-                }
+        if let Some(conn) = connections.get_mut(profile_name) {
+            if !matches!(conn.status, VpnStatus::Error(_)) {
+                conn.status = VpnStatus::Disconnected;
             }
-            Err(e) => {
-                if let Some(conn) = connections.get_mut(profile_name) {
-                    conn.status = VpnStatus::Error(e.to_string());
-                }
-                return Err(e);
-            }
+            conn.connected_since = None;
+            conn.ip_address = None;
         }
 
         Ok(())
@@ -169,60 +209,8 @@ impl VpnManager {
             .unwrap_or(VpnStatus::Disconnected)
     }
 
-    /// Get the actual system status of a VPN connection
-    pub async fn get_system_status(&self, profile_name: &str) -> VpnStatus {
-        #[cfg(target_os = "macos")]
-        {
-            if let Ok(output) = Command::new("scutil")
-                .arg("--nc")
-                .arg("status")
-                .arg(profile_name)
-                .output()
-                .await
-            {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let first_line = stdout.lines().next().unwrap_or("");
-                if first_line.contains("Connected") && !first_line.contains("Disconnected") {
-                    return VpnStatus::Connected;
-                } else if first_line.contains("Connecting") {
-                    return VpnStatus::Connecting;
-                } else if first_line.contains("Disconnecting") {
-                    return VpnStatus::Disconnecting;
-                } else {
-                    return VpnStatus::Disconnected;
-                }
-            }
-        }
-
-        #[cfg(target_os = "linux")]
-        {
-            if let Ok(output) = Command::new("nmcli")
-                .arg("-t")
-                .arg("-f")
-                .arg("NAME,STATE")
-                .arg("connection")
-                .arg("show")
-                .arg("--active")
-                .output()
-                .await
-            {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                for line in stdout.lines() {
-                    let parts: Vec<&str> = line.split(':').collect();
-                    if parts.len() >= 2 && parts[0] == profile_name {
-                        let state = parts[1].to_lowercase();
-                        if state.contains("activated") && !state.contains("deactivated") {
-                            return VpnStatus::Connected;
-                        } else if state.contains("activating") {
-                            return VpnStatus::Connecting;
-                        } else if state.contains("deactivating") {
-                            return VpnStatus::Disconnecting;
-                        }
-                    }
-                }
-            }
-        }
-
+    /// Get the actual system status of a VPN connection (not used in purely native mode)
+    pub async fn get_system_status(&self, _profile_name: &str) -> VpnStatus {
         VpnStatus::Disconnected
     }
 
@@ -245,54 +233,8 @@ impl VpnManager {
         }
     }
 
-    /// Refresh status for all connections
-    pub async fn refresh_all_status(&self, profiles: &[VpnProfile]) -> Result<()> {
-        // Query system for actual VPN status
-        let active_vpns = self.get_active_vpns().await?;
-
-        let mut connections = self.connections.write().await;
-
-        // Ensure all profiles are in the map
-        for p in profiles {
-            if !connections.contains_key(&p.name) {
-                connections.insert(
-                    p.name.clone(),
-                    VpnConnection {
-                        profile_name: p.name.clone(),
-                        status: VpnStatus::Disconnected,
-                        connected_since: None,
-                        ip_address: None,
-                        bytes_sent: 0,
-                        bytes_received: 0,
-                    },
-                );
-            }
-        }
-
-        for (_, conn) in connections.iter_mut() {
-            if let Some(active_info) = active_vpns
-                .iter()
-                .find(|(name, _)| name == &conn.profile_name)
-            {
-                log::debug!(
-                    "{} {} {} {}",
-                    conn.status.as_str(),
-                    conn.profile_name,
-                    active_info.0,
-                    active_info.1.as_deref().unwrap_or("")
-                );
-                if !matches!(conn.status, VpnStatus::Connected) {
-                    conn.status = VpnStatus::Connected;
-                    conn.connected_since = Some(chrono::Local::now());
-                }
-                conn.ip_address = active_info.1.clone();
-            } else {
-                conn.status = VpnStatus::Disconnected;
-                conn.connected_since = None;
-                conn.ip_address = None;
-            }
-        }
-
+    /// Refresh status (not used in purely native mode)
+    pub async fn refresh_all_status(&self, _profiles: &[VpnProfile]) -> Result<()> {
         Ok(())
     }
 
@@ -300,232 +242,6 @@ impl VpnManager {
     pub async fn get_all_connections(&self) -> Vec<VpnConnection> {
         let connections = self.connections.read().await;
         connections.values().cloned().collect()
-    }
-
-    /// Execute platform-specific VPN connect command
-    async fn execute_vpn_connect(&self, profile: &VpnProfile) -> Result<()> {
-        #[cfg(target_os = "windows")]
-        {
-            // Windows: Use rasdial or PowerShell
-            let output = Command::new("powershell")
-                .arg("-Command")
-                .arg(format!(
-                    "rasdial '{}' /disconnect; rasdial '{}' '{}' '{}'",
-                    profile.name,
-                    profile.name,
-                    profile.username.as_deref().unwrap_or(""),
-                    "" // Password would be handled securely
-                ))
-                .output()
-                .await?;
-
-            if !output.status.success() {
-                return Err(anyhow!(
-                    "Failed to connect: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                ));
-            }
-        }
-
-        #[cfg(target_os = "linux")]
-        {
-            // Linux: Use NetworkManager or strongSwan
-            let output = Command::new("nmcli")
-                .arg("connection")
-                .arg("up")
-                .arg(&profile.name)
-                .output()
-                .await?;
-
-            if !output.status.success() {
-                return Err(anyhow!(
-                    "Failed to connect: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                ));
-            }
-        }
-
-        #[cfg(target_os = "macos")]
-        {
-            // macOS: Use scutil or networksetup
-            // First, try to start the service. If we get "No service", provide guidance.
-            let output = Command::new("scutil")
-                .arg("--nc")
-                .arg("start")
-                .arg(&profile.name)
-                .output()
-                .await?;
-
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-
-            if !output.status.success() {
-                let combined = format!("{}\n{}", stdout, stderr);
-                // Common macOS message when the service isn't registered
-                if combined.contains("No service") || combined.contains("No such service") {
-                    return Err(anyhow!(
-                        "No system VPN service found for '{}'.\n- If this is an Azure profile, import the .azvpn/.xml file into the 'Azure VPN Client' App (e.g.: open -a 'Azure VPN Client' /path/to/profile.azvpn).\n- Alternatively, open Azure VPN Client and create/import a profile with the same name.\n- Then try again from remipn.",
-                        profile.name
-                    ));
-                }
-                if combined.to_lowercase().contains("authentication")
-                    || combined.to_lowercase().contains("login")
-                {
-                    return Err(anyhow!(
-                        "Azure VPN authentication required. Check system pop-ups or run: scutil --nc start '{}'",
-                        profile.name
-                    ));
-                }
-                return Err(anyhow!("Failed to connect: {}", stderr));
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Execute platform-specific VPN disconnect command
-    async fn execute_vpn_disconnect(&self, profile_name: &str) -> Result<()> {
-        #[cfg(target_os = "windows")]
-        {
-            let output = Command::new("rasdial")
-                .arg(profile_name)
-                .arg("/disconnect")
-                .output()
-                .await?;
-
-            if !output.status.success() {
-                return Err(anyhow!(
-                    "Failed to disconnect: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                ));
-            }
-        }
-
-        #[cfg(target_os = "linux")]
-        {
-            let output = Command::new("nmcli")
-                .arg("connection")
-                .arg("down")
-                .arg(profile_name)
-                .output()
-                .await?;
-
-            if !output.status.success() {
-                return Err(anyhow!(
-                    "Failed to disconnect: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                ));
-            }
-        }
-
-        #[cfg(target_os = "macos")]
-        {
-            let output = Command::new("scutil")
-                .arg("--nc")
-                .arg("stop")
-                .arg(profile_name)
-                .output()
-                .await?;
-
-            if !output.status.success() {
-                return Err(anyhow!(
-                    "Failed to disconnect: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                ));
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Get a list of currently active VPN connections with a list of optional IP addresses
-    pub async fn get_active_vpns(&self) -> Result<Vec<(String, Option<String>)>> {
-        let mut active = Vec::new();
-
-        #[cfg(target_os = "windows")]
-        {
-            let output = Command::new("rasdial").output().await?;
-
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            for line in stdout.lines() {
-                if line.contains("Connected") {
-                    // Parse connection name from output
-                    if let Some(name) = line.split_whitespace().next() {
-                        active.push((name.to_string(), None));
-                    }
-                }
-            }
-        }
-
-        #[cfg(target_os = "linux")]
-        {
-            let output = Command::new("nmcli")
-                .arg("-t")
-                .arg("-f")
-                .arg("NAME,TYPE,STATE,IP4.ADDRESS")
-                .arg("connection")
-                .arg("show")
-                .arg("--active")
-                .output()
-                .await?;
-
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            for line in stdout.lines() {
-                let parts: Vec<&str> = line.split(':').collect();
-                if parts.len() >= 3 && parts[1].contains("vpn") {
-                    let name = parts[0].to_string();
-                    let ip = parts
-                        .get(3)
-                        .filter(|s| !s.is_empty())
-                        .map(|s| s.to_string());
-                    active.push((name, ip));
-                }
-            }
-        }
-
-        #[cfg(target_os = "macos")]
-        {
-            let output = Command::new("scutil")
-                .arg("--nc")
-                .arg("list")
-                .output()
-                .await?;
-
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            for line in stdout.lines() {
-                if line.contains("Connected")
-                    && let Some(name) = line.split('"').nth(1)
-                {
-                    active.push((name.to_string(), self.get_macos_ip(name).await));
-                }
-            }
-        }
-
-        Ok(active)
-    }
-
-    #[cfg(target_os = "macos")]
-    async fn get_macos_ip(&self, _name: &str) -> Option<String> {
-        // This is a heuristic: look for utun interfaces which are common for VPNs
-        let output = Command::new("ifconfig").output().await.ok()?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let mut current_interface = None;
-
-        for line in stdout.lines() {
-            if !line.starts_with('\t') {
-                current_interface = line.split(':').next();
-            } else if let Some(iface) = current_interface
-                && iface.starts_with("utun")
-                && line.contains("inet ")
-            {
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() >= 2 {
-                    return Some(parts[1].to_string());
-                }
-            }
-        }
-        None
     }
 }
 

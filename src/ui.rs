@@ -1,3 +1,4 @@
+use std::fmt::format;
 use crate::app::{App, Screen};
 use ratatui::{
     Frame,
@@ -16,7 +17,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         Screen::FileBrowser => draw_file_browser_screen(f, app),
         Screen::Help => draw_help_screen(f),
         Screen::DeleteConfirmation => draw_delete_confirmation(f, app),
-        Screen::Search => draw_main_screen(f, app), // Search is rendered as part of the main or overlay
+        Screen::Search => draw_main_screen(f, app),
         Screen::AliasModal => draw_main_screen(f, app),
     }
 }
@@ -32,7 +33,7 @@ fn draw_main_screen(f: &mut Frame, app: &App) {
         .split(f.size());
 
     // Title
-    let title = Paragraph::new("RemiPN")
+    let title = Paragraph::new(format!("RemiPN {}", env!("CARGO_PKG_VERSION")))
         .style(
             Style::default()
                 .fg(Color::Yellow)
@@ -122,6 +123,7 @@ fn draw_vpn_list(f: &mut Frame, app: &App, area: Rect) {
                 Cell::from(Span::styled(status_text, Style::default().fg(status_color))),
                 Cell::from(connected_time),
                 Cell::from(ip_addr),
+                Cell::from(profile.protocol.clone()),
             ])
         })
         .collect();
@@ -170,7 +172,8 @@ fn draw_vpn_list(f: &mut Frame, app: &App, area: Rect) {
             Constraint::Length(15), // Category
             Constraint::Length(15), // Status
             Constraint::Length(10), // Duration
-            Constraint::Min(20),    // IP Address
+            Constraint::Length(10), // IP Address
+            Constraint::Min(20),    // Tunnel
         ],
     )
     .header(
@@ -181,6 +184,7 @@ fn draw_vpn_list(f: &mut Frame, app: &App, area: Rect) {
             header_status,
             "Duration".to_string(),
             "IP Address".to_string(),
+            "Tunnel".to_string(),
         ])
         .style(
             Style::default()
@@ -206,31 +210,25 @@ fn draw_vpn_list(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_logs_panel(f: &mut Frame, app: &App, area: Rect) {
-    let logs: Vec<ListItem> = app
+    let log_content: String = app
         .logs
         .iter()
         .rev()
-        .take(area.height as usize - 2)
-        .map(|log| {
-            let style = if log.contains("Error") || log.contains("✗") {
-                Style::default().fg(Color::Red)
-            } else if log.contains("✓") {
-                Style::default().fg(Color::Green)
-            } else {
-                Style::default().fg(Color::Gray)
-            };
-            ListItem::new(log.as_str()).style(style)
-        })
-        .collect();
+        .map(|log| log.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
 
-    let logs_list = List::new(logs).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_type(ratatui::widgets::BorderType::Rounded)
-            .title(" Logs (l: toggle) "),
-    );
+    let logs_para = Paragraph::new(log_content)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(ratatui::widgets::BorderType::Rounded)
+                .title(" Logs (l: toggle | c: copy last) "),
+        )
+        .style(Style::default().fg(Color::Gray))
+        .wrap(Wrap { trim: false });
 
-    f.render_widget(logs_list, area);
+    f.render_widget(logs_para, area);
 }
 
 fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
@@ -284,6 +282,7 @@ fn draw_add_profile_screen(f: &mut Frame, app: &App) {
             Constraint::Length(3),
             Constraint::Length(3),
             Constraint::Length(3),
+            Constraint::Length(3),
             Constraint::Min(3),
         ])
         .split(f.size());
@@ -310,6 +309,7 @@ fn draw_add_profile_screen(f: &mut Frame, app: &App) {
         ("Certificate Path (optional)", 3),
         ("Username (optional)", 4),
         ("Aliases (comma-separated)", 5),
+        ("Protocol (OpenVPN, IKEv2, WireGuard)", 6),
     ];
 
     for (i, (label, field_idx)) in fields.iter().enumerate() {
@@ -346,7 +346,7 @@ fn draw_add_profile_screen(f: &mut Frame, app: &App) {
         Paragraph::new("Tab: next field | Shift+Tab: prev field | Enter: save | Esc: cancel")
             .style(Style::default().fg(Color::Gray))
             .alignment(Alignment::Center);
-    f.render_widget(help, chunks[7]);
+    f.render_widget(help, chunks[8]);
 }
 
 fn draw_edit_profile_screen(f: &mut Frame, app: &App) {
@@ -366,7 +366,7 @@ fn draw_import_xml_screen(f: &mut Frame, app: &App) {
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" Import VPN from Microsoft XML Dump ");
+        .title(" Import VPN from XML ");
     f.render_widget(block, area);
 
     let title = Paragraph::new("Enter the full path to the XML file or press 'f' to browse:")
