@@ -18,6 +18,18 @@
 
 ## Installation
 
+### Install latest prebuilt binary (recommended)
+
+This installer detects your platform (`macOS`, `Linux`, or `Windows` via Git Bash/MSYS/Cygwin), downloads the latest compatible release asset, and installs it to `~/.local/bin`.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/rhslack/remipn/main/scripts/install.sh | bash
+```
+
+If `~/.local/bin` is not in your `PATH`, add it in your shell profile.
+
+### Build from source
+
 Make sure you have [Rust](https://www.rust-lang.org/) installed on your system.
 
 ```bash
