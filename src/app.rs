@@ -1,6 +1,7 @@
 use crate::config::{Config, VpnProfile};
 use crate::vpn::{VpnConnection, VpnManager, VpnStatus};
-use anyhow::Result;
+use anyhow::{Result, anyhow};
+use async_process::Command;
 use crossterm::event::{KeyCode, KeyEvent};
 
 pub enum AppEvent {
@@ -286,18 +287,14 @@ impl App {
                 self.add_profile_data = vec![String::new(); 6];
                 self.input_field = 0;
             }
-            KeyCode::Char('e') => {
-                if !self.config.profiles.is_empty() {
-                    self.screen = Screen::EditProfile;
-                    self.input_mode = InputMode::Editing;
-                    self.load_profile_to_edit();
-                    self.input_field = 1; // Start from Gateway Address when editing
-                }
+            KeyCode::Char('e') if !self.config.profiles.is_empty() => {
+                self.screen = Screen::EditProfile;
+                self.input_mode = InputMode::Editing;
+                self.load_profile_to_edit();
+                self.input_field = 1; // Start from Gateway Address when editing
             }
-            KeyCode::Char('x') => {
-                if !self.get_filtered_profiles_indices().is_empty() {
-                    self.screen = Screen::DeleteConfirmation;
-                }
+            KeyCode::Char('x') if !self.get_filtered_profiles_indices().is_empty() => {
+                self.screen = Screen::DeleteConfirmation;
             }
             KeyCode::Char('/') => {
                 self.screen = Screen::Search;
@@ -312,6 +309,13 @@ impl App {
             }
             KeyCode::Char('r') => {
                 self.refresh_status().await?;
+            }
+            KeyCode::Char('u') => {
+                if let Err(e) = self.check_for_updates().await {
+                    let msg = format!("Update check failed: {}", e);
+                    self.set_status_message(msg.clone());
+                    self.add_log(msg);
+                }
             }
             KeyCode::Char('l') => {
                 self.show_logs = !self.show_logs;
@@ -386,17 +390,17 @@ impl App {
                     self.input_field = 5;
                 }
             }
-            KeyCode::Char(c) => {
+            KeyCode::Char(c)
                 // Prevent editing name field if in EditProfile screen
-                if !(self.screen == Screen::EditProfile && self.input_field == 0) {
-                    self.add_profile_data[self.input_field].push(c);
-                }
+                if !(self.screen == Screen::EditProfile && self.input_field == 0) =>
+            {
+                self.add_profile_data[self.input_field].push(c);
             }
-            KeyCode::Backspace => {
+            KeyCode::Backspace
                 // Prevent editing name field if in EditProfile screen
-                if !(self.screen == Screen::EditProfile && self.input_field == 0) {
-                    self.add_profile_data[self.input_field].pop();
-                }
+                if !(self.screen == Screen::EditProfile && self.input_field == 0) =>
+            {
+                self.add_profile_data[self.input_field].pop();
             }
             _ => {}
         }
@@ -1060,6 +1064,44 @@ impl App {
         self.refresh_from_manager().await
     }
 
+    async fn check_for_updates(&mut self) -> Result<()> {
+        let current_version = env!("CARGO_PKG_VERSION");
+        let latest_tag = fetch_latest_release_tag().await?;
+
+        let current_normalized = normalize_version(current_version);
+        let latest_normalized = normalize_version(&latest_tag);
+
+        match compare_versions(&latest_normalized, &current_normalized) {
+            std::cmp::Ordering::Greater => {
+                let msg = format!(
+                    "Update available: {} (current: {})",
+                    latest_tag, current_version
+                );
+                self.set_status_message(msg.clone());
+                self.add_log(msg);
+                self.add_log(
+                    "Install: curl -fsSL https://raw.githubusercontent.com/rhslack/remipn/main/scripts/install.sh | bash"
+                        .to_string(),
+                );
+            }
+            std::cmp::Ordering::Equal => {
+                let msg = format!("You are up to date ({})", current_version);
+                self.set_status_message(msg.clone());
+                self.add_log(msg);
+            }
+            std::cmp::Ordering::Less => {
+                let msg = format!(
+                    "You run a newer version ({}) than latest release ({})",
+                    current_version, latest_tag
+                );
+                self.set_status_message(msg.clone());
+                self.add_log(msg);
+            }
+        }
+
+        Ok(())
+    }
+
     pub async fn update(&mut self) -> Result<()> {
         // Periodic status update
         let now = std::time::Instant::now();
@@ -1085,4 +1127,61 @@ impl App {
     pub fn get_connections(&self) -> Vec<VpnConnection> {
         self.connections.clone()
     }
+}
+
+async fn fetch_latest_release_tag() -> Result<String> {
+    let output = Command::new("curl")
+        .arg("-fsSL")
+        .arg("https://api.github.com/repos/rhslack/remipn/releases/latest")
+        .output()
+        .await
+        .map_err(|e| anyhow!("Failed to execute curl: {}", e))?;
+
+    if !output.status.success() {
+        return Err(anyhow!(
+            "Failed to fetch latest release (exit code: {:?})",
+            output.status.code()
+        ));
+    }
+
+    let body = String::from_utf8(output.stdout)
+        .map_err(|_| anyhow!("GitHub API response is not valid UTF-8"))?;
+
+    extract_json_tag_name(&body)
+        .ok_or_else(|| anyhow!("Could not read 'tag_name' from latest release response"))
+}
+
+fn extract_json_tag_name(body: &str) -> Option<String> {
+    let marker = "\"tag_name\"";
+    let start = body.find(marker)?;
+    let after_marker = &body[start + marker.len()..];
+    let colon = after_marker.find(':')?;
+    let mut value = after_marker[colon + 1..].trim_start();
+    if !value.starts_with('"') {
+        return None;
+    }
+
+    value = &value[1..];
+    let end = value.find('"')?;
+    Some(value[..end].to_string())
+}
+
+fn normalize_version(version: &str) -> String {
+    version.trim().trim_start_matches('v').to_string()
+}
+
+fn compare_versions(left: &str, right: &str) -> std::cmp::Ordering {
+    let left_parts = parse_semver_triplet(left);
+    let right_parts = parse_semver_triplet(right);
+    left_parts.cmp(&right_parts)
+}
+
+fn parse_semver_triplet(version: &str) -> [u64; 3] {
+    let core = version.split('-').next().unwrap_or(version);
+    let mut parts = core.split('.').filter_map(|p| p.parse::<u64>().ok());
+    [
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+    ]
 }

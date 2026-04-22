@@ -16,7 +16,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         Screen::FileBrowser => draw_file_browser_screen(f, app),
         Screen::Help => draw_help_screen(f),
         Screen::DeleteConfirmation => draw_delete_confirmation(f, app),
-        Screen::Search => draw_main_screen(f, app), // Search is rendered as part of the main or overlay
+        Screen::Search => draw_main_screen(f, app),
         Screen::AliasModal => draw_main_screen(f, app),
     }
 }
@@ -464,6 +464,7 @@ fn draw_help_screen(f: &mut Frame) {
         )]),
         Line::from("  Enter/Space - Connect/Disconnect selected VPN"),
         Line::from("  r           - Refresh VPN status"),
+        Line::from("  u           - Check for updates"),
         Line::from("  R           - Toggle auto-reconnect"),
         Line::from(""),
         Line::from(vec![Span::styled(

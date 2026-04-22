@@ -59,6 +59,7 @@ remipn
 - `x`: Delete the selected profile
 - `i`: Import profiles from XML via file browser
 - `I`: Manually trigger auto-import from standard locations (Azure VPN Client, etc.)
+- `u`: Check for updates
 - `/`: Search through profiles
 - `l`: Show/Hide logs
 - `s`: Change sorting
