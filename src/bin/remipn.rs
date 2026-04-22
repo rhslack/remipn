@@ -1,4 +1,5 @@
 use anyhow::{Result, anyhow};
+use async_process::Command;
 use clap::{Parser, Subcommand};
 use colored::*;
 use comfy_table::Table;
@@ -40,6 +41,8 @@ enum Commands {
     Status { name: Option<String> },
     #[command(visible_alias = "l")]
     List,
+    #[command(visible_alias = "u")]
+    Update,
 }
 
 #[tokio::main]
@@ -61,6 +64,7 @@ async fn main() -> Result<()> {
         Some(Commands::Status { name }) => cmd_status(name).await,
         Some(Commands::Disconnect { name }) => cmd_disconnect(name).await,
         Some(Commands::Connect { name }) => cmd_connect(name).await,
+        Some(Commands::Update) => cmd_check_update().await,
     }
 }
 
@@ -440,6 +444,104 @@ async fn cmd_connect(name: String) -> Result<()> {
         attempt += 1;
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
+}
+
+async fn cmd_check_update() -> Result<()> {
+    let current_version = env!("CARGO_PKG_VERSION");
+    let latest_tag = fetch_latest_release_tag().await?;
+
+    let current_normalized = normalize_version(current_version);
+    let latest_normalized = normalize_version(&latest_tag);
+
+    match compare_versions(&latest_normalized, &current_normalized) {
+        std::cmp::Ordering::Greater => {
+            println!(
+                "{} New version available: {} (current: {})",
+                " ↑ ".on_green(),
+                latest_tag.bold().green(),
+                current_version.yellow()
+            );
+            println!(
+                "Run {} to install the latest release.",
+                "curl -fsSL https://raw.githubusercontent.com/rhslack/remipn/main/scripts/install.sh | bash"
+                    .cyan()
+            );
+        }
+        std::cmp::Ordering::Equal => {
+            println!(
+                "{} You are up to date ({}).",
+                " ✓ ".on_green(),
+                current_version.bold().green()
+            );
+        }
+        std::cmp::Ordering::Less => {
+            println!(
+                "{} You are running a newer version ({}) than latest release ({}).",
+                " i ".on_blue(),
+                current_version.bold().cyan(),
+                latest_tag.yellow()
+            );
+        }
+    }
+
+    Ok(())
+}
+
+async fn fetch_latest_release_tag() -> Result<String> {
+    let output = Command::new("curl")
+        .arg("-fsSL")
+        .arg("https://api.github.com/repos/rhslack/remipn/releases/latest")
+        .output()
+        .await
+        .map_err(|e| anyhow!("Failed to execute curl: {}", e))?;
+
+    if !output.status.success() {
+        return Err(anyhow!(
+            "Failed to fetch latest release (exit code: {:?})",
+            output.status.code()
+        ));
+    }
+
+    let body = String::from_utf8(output.stdout)
+        .map_err(|_| anyhow!("GitHub API response is not valid UTF-8"))?;
+
+    extract_json_tag_name(&body)
+        .ok_or_else(|| anyhow!("Could not read 'tag_name' from latest release response"))
+}
+
+fn extract_json_tag_name(body: &str) -> Option<String> {
+    let marker = "\"tag_name\"";
+    let start = body.find(marker)?;
+    let after_marker = &body[start + marker.len()..];
+    let colon = after_marker.find(':')?;
+    let mut value = after_marker[colon + 1..].trim_start();
+    if !value.starts_with('"') {
+        return None;
+    }
+
+    value = &value[1..];
+    let end = value.find('"')?;
+    Some(value[..end].to_string())
+}
+
+fn normalize_version(version: &str) -> String {
+    version.trim().trim_start_matches('v').to_string()
+}
+
+fn compare_versions(left: &str, right: &str) -> std::cmp::Ordering {
+    let left_parts = parse_semver_triplet(left);
+    let right_parts = parse_semver_triplet(right);
+    left_parts.cmp(&right_parts)
+}
+
+fn parse_semver_triplet(version: &str) -> [u64; 3] {
+    let core = version.split('-').next().unwrap_or(version);
+    let mut parts = core.split('.').filter_map(|p| p.parse::<u64>().ok());
+    [
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+    ]
 }
 
 fn resolve_profile<'a>(

@@ -18,6 +18,18 @@
 
 ## Installation
 
+### Install latest prebuilt binary (recommended)
+
+This installer detects your platform (`macOS`, `Linux`, or `Windows` via Git Bash/MSYS/Cygwin), downloads the latest compatible release asset, and installs it to `~/.local/bin`.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/rhslack/remipn/main/scripts/install.sh | bash
+```
+
+If `~/.local/bin` is not in your `PATH`, add it in your shell profile.
+
+### Build from source
+
 Make sure you have [Rust](https://www.rust-lang.org/) installed on your system.
 
 ```bash
@@ -47,6 +59,7 @@ remipn
 - `x`: Delete the selected profile
 - `i`: Import profiles from XML via file browser
 - `I`: Manually trigger auto-import from standard locations (Azure VPN Client, etc.)
+- `u`: Check for updates
 - `/`: Search through profiles
 - `l`: Show/Hide logs
 - `s`: Change sorting
