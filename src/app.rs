@@ -1,15 +1,50 @@
 use crate::config::{Config, VpnProfile};
-use crate::vpn::{VpnConnection, VpnManager, VpnStatus};
+use crate::vpn::{Backend, VpnConnection, VpnManager, VpnStatus};
 use anyhow::{Result, anyhow};
 use async_process::Command;
 use crossterm::event::{KeyCode, KeyEvent};
+use std::collections::VecDeque;
 
 pub enum AppEvent {
     Input(KeyEvent),
     Tick,
     VpnStatusUpdated,
-    Notification(String),
+    Notification(String, LogLevel),
     SetStatusMessage(String),
+}
+
+/// Severity of a log entry, decided once by whoever raises it rather than
+/// guessed later from the message text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogLevel {
+    Info,
+    Success,
+    Warning,
+    Error,
+}
+
+impl LogLevel {
+    pub fn color(&self) -> ratatui::style::Color {
+        match self {
+            LogLevel::Info => ratatui::style::Color::Gray,
+            LogLevel::Success => ratatui::style::Color::Green,
+            LogLevel::Warning => ratatui::style::Color::Yellow,
+            LogLevel::Error => ratatui::style::Color::Red,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct LogEntry {
+    pub timestamp: chrono::DateTime<chrono::Local>,
+    pub level: LogLevel,
+    pub message: String,
+}
+
+impl LogEntry {
+    pub fn formatted(&self) -> String {
+        format!("[{}] {}", self.timestamp.format("%H:%M:%S"), self.message)
+    }
 }
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Screen {
@@ -158,13 +193,20 @@ pub struct App {
     pub input_field: usize,
     pub status_message: Option<(String, chrono::DateTime<chrono::Local>)>,
     pub show_logs: bool,
-    pub logs: Vec<String>,
+    pub logs: VecDeque<LogEntry>,
+    /// How many wrapped display lines to skip from the newest end when
+    /// rendering the logs panel, so history isn't stuck out of reach after
+    /// the terminal is resized smaller. 0 means "show the latest". Counts
+    /// wrapped lines rather than entries since wrapping (and thus how many
+    /// lines one entry takes) depends on the panel's width at render time.
+    pub log_scroll: usize,
     pub auto_reconnect: bool,
     pub connections: Vec<VpnConnection>,
     pub last_update: std::time::Instant,
     pub file_browser: Option<FileBrowser>,
     pub search_query: String,
     pub add_profile_data: Vec<String>,
+    pub selected_backend: Backend,
     pub sort_column: SortColumn,
     pub sort_direction: SortDirection,
     pub alias_input: String,
@@ -188,13 +230,15 @@ impl App {
             input_field: 0,
             status_message: None,
             show_logs: false,
-            logs: Vec::new(),
+            logs: VecDeque::new(),
+            log_scroll: 0,
             auto_reconnect: false,
             connections: Vec::new(),
             last_update: std::time::Instant::now(),
             file_browser: None,
             search_query: String::new(),
             add_profile_data: vec![String::new(); 6],
+            selected_backend: Backend::OsNative,
             sort_column: SortColumn::Name,
             sort_direction: SortDirection::Asc,
             alias_input: String::new(),
@@ -211,8 +255,8 @@ impl App {
             AppEvent::Input(key) => return self.handle_key(key).await,
             AppEvent::Tick => self.update().await?,
             AppEvent::VpnStatusUpdated => self.refresh_from_manager().await?,
-            AppEvent::Notification(msg) => {
-                self.add_log(msg.clone());
+            AppEvent::Notification(msg, level) => {
+                self.add_log_level(msg, level);
             }
             AppEvent::SetStatusMessage(msg) => {
                 self.set_status_message(msg);
@@ -285,6 +329,7 @@ impl App {
                 self.screen = Screen::AddProfile;
                 self.input_mode = InputMode::Editing;
                 self.add_profile_data = vec![String::new(); 6];
+                self.selected_backend = Backend::OsNative;
                 self.input_field = 0;
             }
             KeyCode::Char('e') if !self.config.profiles.is_empty() => {
@@ -314,11 +359,31 @@ impl App {
                 if let Err(e) = self.check_for_updates().await {
                     let msg = format!("Update check failed: {}", e);
                     self.set_status_message(msg.clone());
-                    self.add_log(msg);
+                    self.add_log_level(msg, LogLevel::Error);
                 }
             }
             KeyCode::Char('l') => {
                 self.show_logs = !self.show_logs;
+                self.log_scroll = 0;
+            }
+            KeyCode::Char('L') if self.show_logs => {
+                self.logs.clear();
+                self.log_scroll = 0;
+                self.set_status_message("Logs cleared".to_string());
+            }
+            // Scroll the logs panel so history stays reachable even when a
+            // smaller terminal only has room to show a few recent lines.
+            // The exact wrapped line count depends on the panel's render
+            // width, so this cap is just generous enough to not matter;
+            // rendering clamps precisely against the real total anyway.
+            KeyCode::Char('[') if self.show_logs => {
+                self.log_scroll = self
+                    .log_scroll
+                    .saturating_add(1)
+                    .min(self.logs.len().saturating_mul(20));
+            }
+            KeyCode::Char(']') if self.show_logs => {
+                self.log_scroll = self.log_scroll.saturating_sub(1);
             }
             KeyCode::Char('s') => {
                 self.cycle_sort();
@@ -338,8 +403,9 @@ impl App {
             KeyCode::Char('I') => {
                 if let Ok(imported) = self.config.auto_import_profiles() {
                     if imported {
-                        self.add_log(
+                        self.add_log_level(
                             "Manually imported new profiles from standard locations".to_string(),
+                            LogLevel::Success,
                         );
                     } else {
                         self.set_status_message(
@@ -373,7 +439,7 @@ impl App {
                 self.save_new_profile()?;
             }
             KeyCode::Tab => {
-                self.input_field = (self.input_field + 1) % 6;
+                self.input_field = (self.input_field + 1) % 7;
                 // Skip the name field (index 0) if editing
                 if self.screen == Screen::EditProfile && self.input_field == 0 {
                     self.input_field = 1;
@@ -381,24 +447,34 @@ impl App {
             }
             KeyCode::BackTab => {
                 self.input_field = if self.input_field == 0 {
-                    5
+                    6
                 } else {
                     self.input_field - 1
                 };
                 // Skip the name field (index 0) if editing
                 if self.screen == Screen::EditProfile && self.input_field == 0 {
-                    self.input_field = 5;
+                    self.input_field = 6;
                 }
             }
+            // Field 6 (Backend) is a picker, not free text: cycle it instead of typing.
+            KeyCode::Left | KeyCode::Right if self.input_field == 6 => {
+                self.selected_backend = if key.code == KeyCode::Left {
+                    self.selected_backend.cycle_prev()
+                } else {
+                    self.selected_backend.cycle_next()
+                };
+            }
             KeyCode::Char(c)
-                // Prevent editing name field if in EditProfile screen
-                if !(self.screen == Screen::EditProfile && self.input_field == 0) =>
+                // Prevent editing name field if in EditProfile screen, and the Backend picker
+                if !(self.screen == Screen::EditProfile && self.input_field == 0)
+                    && self.input_field != 6 =>
             {
                 self.add_profile_data[self.input_field].push(c);
             }
             KeyCode::Backspace
-                // Prevent editing name field if in EditProfile screen
-                if !(self.screen == Screen::EditProfile && self.input_field == 0) =>
+                // Prevent editing name field if in EditProfile screen, and the Backend picker
+                if !(self.screen == Screen::EditProfile && self.input_field == 0)
+                    && self.input_field != 6 =>
             {
                 self.add_profile_data[self.input_field].pop();
             }
@@ -559,20 +635,26 @@ impl App {
                         self.screen = Screen::Main;
                         self.input_mode = InputMode::Normal;
                         self.set_status_message(format!("Imported {} profiles", count));
-                        self.add_log(format!(
-                            "Successfully imported {} profiles from {}",
-                            count, path
-                        ));
+                        self.add_log_level(
+                            format!("Successfully imported {} profiles from {}", count, path),
+                            LogLevel::Success,
+                        );
                     }
                     Err(e) => {
                         self.set_status_message(format!("Import error: {}", e));
-                        self.add_log(format!("Error parsing XML from {}: {}", path, e));
+                        self.add_log_level(
+                            format!("Error parsing XML from {}: {}", path, e),
+                            LogLevel::Error,
+                        );
                     }
                 }
             }
             Err(e) => {
                 self.set_status_message(format!("File error: {}", e));
-                self.add_log(format!("Error reading file {}: {}", path, e));
+                self.add_log_level(
+                    format!("Error reading file {}: {}", path, e),
+                    LogLevel::Error,
+                );
             }
         }
         Ok(())
@@ -608,10 +690,10 @@ impl App {
                         )))
                         .await;
                     let _ = event_tx
-                        .send(AppEvent::Notification(format!(
-                            "Disconnecting from {}...",
-                            profile_name
-                        )))
+                        .send(AppEvent::Notification(
+                            format!("Disconnecting from {}...", profile_name),
+                            LogLevel::Info,
+                        ))
                         .await;
 
                     match vpn_manager.disconnect(&profile_name).await {
@@ -629,10 +711,13 @@ impl App {
                                             )))
                                             .await;
                                         let _ = event_tx
-                                            .send(AppEvent::Notification(format!(
-                                                "Successfully disconnected from {}",
-                                                profile_name
-                                            )))
+                                            .send(AppEvent::Notification(
+                                                format!(
+                                                    "Successfully disconnected from {}",
+                                                    profile_name
+                                                ),
+                                                LogLevel::Success,
+                                            ))
                                             .await;
                                         break;
                                     }
@@ -644,10 +729,13 @@ impl App {
                                             )))
                                             .await;
                                         let _ = event_tx
-                                            .send(AppEvent::Notification(format!(
-                                                "Disconnect error for {}: {}",
-                                                profile_name, e
-                                            )))
+                                            .send(AppEvent::Notification(
+                                                format!(
+                                                    "Disconnect error for {}: {}",
+                                                    profile_name, e
+                                                ),
+                                                LogLevel::Error,
+                                            ))
                                             .await;
                                         break;
                                     }
@@ -660,10 +748,13 @@ impl App {
                                                 )))
                                                 .await;
                                             let _ = event_tx
-                                                .send(AppEvent::Notification(format!(
-                                                    "Timeout waiting for disconnection of {}",
-                                                    profile_name
-                                                )))
+                                                .send(AppEvent::Notification(
+                                                    format!(
+                                                        "Timeout waiting for disconnection of {}",
+                                                        profile_name
+                                                    ),
+                                                    LogLevel::Warning,
+                                                ))
                                                 .await;
                                             break;
                                         }
@@ -680,10 +771,10 @@ impl App {
                                 )))
                                 .await;
                             let _ = event_tx
-                                .send(AppEvent::Notification(format!(
-                                    "Error disconnecting from {}: {}",
-                                    profile_name, e
-                                )))
+                                .send(AppEvent::Notification(
+                                    format!("Error disconnecting from {}: {}", profile_name, e),
+                                    LogLevel::Error,
+                                ))
                                 .await;
                         }
                     }
@@ -714,10 +805,10 @@ impl App {
                                         )))
                                         .await;
                                     let _ = event_tx
-                                        .send(AppEvent::Notification(format!(
-                                            "Closing previous VPN: {}...",
-                                            name
-                                        )))
+                                        .send(AppEvent::Notification(
+                                            format!("Closing previous VPN: {}...", name),
+                                            LogLevel::Info,
+                                        ))
                                         .await;
                                 }
                             }
@@ -727,10 +818,10 @@ impl App {
 
                         if let Err(e) = connect_res {
                             let _ = event_tx
-                                .send(AppEvent::Notification(format!(
-                                    "Connect error for {}: {}",
-                                    profile_name, e
-                                )))
+                                .send(AppEvent::Notification(
+                                    format!("Connect error for {}: {}", profile_name, e),
+                                    LogLevel::Error,
+                                ))
                                 .await;
 
                             // If it failed due to a disconnection error, let's update the status and potentially retry
@@ -750,10 +841,13 @@ impl App {
                                 }
                                 VpnStatus::Error(e) => {
                                     let _ = event_tx
-                                        .send(AppEvent::Notification(format!(
-                                            "Status error while connecting {}: {}",
-                                            profile_name, e
-                                        )))
+                                        .send(AppEvent::Notification(
+                                            format!(
+                                                "Status error while connecting {}: {}",
+                                                profile_name, e
+                                            ),
+                                            LogLevel::Error,
+                                        ))
                                         .await;
                                     break;
                                 }
@@ -793,7 +887,12 @@ impl App {
                                 if let Ok(active) = vpn_manager.get_active_vpns().await
                                     && active.iter().any(|(name, _)| name != &profile_name)
                                 {
-                                    let _ = event_tx.send(AppEvent::Notification("Another active VPN detected during stabilization. Ensuring exclusivity...".to_string())).await;
+                                    let _ = event_tx
+                                        .send(AppEvent::Notification(
+                                            "Another active VPN detected during stabilization. Ensuring exclusivity...".to_string(),
+                                            LogLevel::Warning,
+                                        ))
+                                        .await;
                                     for (name, _) in active {
                                         if name != profile_name {
                                             let _ = vpn_manager.disconnect(&name).await;
@@ -810,18 +909,21 @@ impl App {
                                     )))
                                     .await;
                                 let _ = event_tx
-                                    .send(AppEvent::Notification(format!(
-                                        "Successfully connected to {}",
-                                        profile_name
-                                    )))
+                                    .send(AppEvent::Notification(
+                                        format!("Successfully connected to {}", profile_name),
+                                        LogLevel::Success,
+                                    ))
                                     .await;
                                 break;
                             } else {
                                 let _ = event_tx
-                                    .send(AppEvent::Notification(format!(
-                                        "Connection to {} dropped during stabilization",
-                                        profile_name
-                                    )))
+                                    .send(AppEvent::Notification(
+                                        format!(
+                                            "Connection to {} dropped during stabilization",
+                                            profile_name
+                                        ),
+                                        LogLevel::Warning,
+                                    ))
                                     .await;
                                 // Fall through to retry logic
                             }
@@ -836,11 +938,14 @@ impl App {
                                 )))
                                 .await;
                             let _ = event_tx
-                                .send(AppEvent::Notification(format!(
-                                    "Failed to connect to {} after {} attempts",
-                                    profile_name,
-                                    max_retries + 1
-                                )))
+                                .send(AppEvent::Notification(
+                                    format!(
+                                        "Failed to connect to {} after {} attempts",
+                                        profile_name,
+                                        max_retries + 1
+                                    ),
+                                    LogLevel::Error,
+                                ))
                                 .await;
                             break;
                         }
@@ -853,10 +958,10 @@ impl App {
                             )
                             .await;
                         let _ = event_tx
-                            .send(AppEvent::Notification(format!(
-                                "Retrying connection to {}...",
-                                profile_name
-                            )))
+                            .send(AppEvent::Notification(
+                                format!("Retrying connection to {}...", profile_name),
+                                LogLevel::Warning,
+                            ))
                             .await;
                         sleep(Duration::from_millis(500)).await;
                     }
@@ -874,6 +979,9 @@ impl App {
             self.set_status_message("Name cannot be empty".to_string());
             return Ok(());
         }
+
+        let is_edit = self.screen == Screen::EditProfile;
+        let indices = self.get_filtered_profiles_indices();
 
         let profile = VpnProfile {
             name,
@@ -896,11 +1004,10 @@ impl App {
             },
             protocol: "IKEv2".to_string(),
             auto_connect: false,
+            backend: self.selected_backend,
         };
 
-        let is_edit = self.screen == Screen::EditProfile;
         if is_edit {
-            let indices = self.get_filtered_profiles_indices();
             if self.selected_profile < indices.len() {
                 let actual_index = indices[self.selected_profile];
                 self.config.profiles[actual_index] = profile;
@@ -957,6 +1064,7 @@ impl App {
             self.add_profile_data[3] = profile.cert_path.clone().unwrap_or_default();
             self.add_profile_data[4] = profile.username.clone().unwrap_or_default();
             self.add_profile_data[5] = profile.aliases.clone().unwrap_or_default();
+            self.selected_backend = profile.backend;
             self.input_field = 0;
         }
     }
@@ -1078,7 +1186,7 @@ impl App {
                     latest_tag, current_version
                 );
                 self.set_status_message(msg.clone());
-                self.add_log(msg);
+                self.add_log_level(msg, LogLevel::Warning);
                 self.add_log(
                     "Install: curl -fsSL https://raw.githubusercontent.com/rhslack/remipn/main/scripts/install.sh | bash"
                         .to_string(),
@@ -1087,7 +1195,7 @@ impl App {
             std::cmp::Ordering::Equal => {
                 let msg = format!("You are up to date ({})", current_version);
                 self.set_status_message(msg.clone());
-                self.add_log(msg);
+                self.add_log_level(msg, LogLevel::Success);
             }
             std::cmp::Ordering::Less => {
                 let msg = format!(
@@ -1117,10 +1225,17 @@ impl App {
     }
 
     pub fn add_log(&mut self, msg: String) {
-        let timestamp = chrono::Local::now().format("%H:%M:%S");
-        self.logs.push(format!("[{}] {}", timestamp, msg));
+        self.add_log_level(msg, LogLevel::Info);
+    }
+
+    pub fn add_log_level(&mut self, msg: String, level: LogLevel) {
+        self.logs.push_back(LogEntry {
+            timestamp: chrono::Local::now(),
+            level,
+            message: msg,
+        });
         if self.logs.len() > 100 {
-            self.logs.remove(0);
+            self.logs.pop_front();
         }
     }
 

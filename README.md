@@ -62,6 +62,8 @@ remipn
 - `u`: Check for updates
 - `/`: Search through profiles
 - `l`: Show/Hide logs
+- `L`: Clear logs (while the panel is open)
+- `[` / `]`: Scroll logs older/newer (while the panel is open)
 - `s`: Change sorting
 - `q`: Quit
 
@@ -96,7 +98,10 @@ Configurations are saved in `~/.config/remipn/config.toml`.
 - **Default**: `~/.config/remipn/imports/` (searched at startup or via `I`).
 - **macOS Azure VPN**: `~/Library/Containers/com.microsoft.AzureVpnMac/Data/Library/Application Support/com.microsoft.AzureVpnMac` (automatically scanned).
 
-Supported formats: `.xml`, `.ovpn`, `.azvpn`.
+Supported formats:
+- `.xml` / `.azvpn` — Azure VPN Client profiles. Connects through the OS's own VPN manager (`nmcli`/`scutil`/`rasdial`); the connection must already exist there under the same name (e.g. imported into the Azure VPN Client app).
+- `.ovpn` — OpenVPN config files. Connected directly via the `openvpn` binary, which must be installed and on `PATH`.
+- `.conf` — WireGuard tunnel files. Connected directly via `wg-quick`/`wg`, which must be installed and on `PATH`.
 
 ## License
 

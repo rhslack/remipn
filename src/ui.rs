@@ -205,29 +205,90 @@ fn draw_vpn_list(f: &mut Frame, app: &App, area: Rect) {
     f.render_stateful_widget(table, area, &mut app.table_state.clone());
 }
 
+/// Greedy word-wrap: breaks `text` into lines no wider than `width`,
+/// hard-breaking a single word that alone exceeds `width`.
+fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut lines = Vec::new();
+    let mut current = String::new();
+
+    for word in text.split(' ') {
+        let mut remaining = word;
+        loop {
+            let sep = if current.is_empty() { 0 } else { 1 };
+            if current.chars().count() + sep + remaining.chars().count() <= width {
+                if sep == 1 {
+                    current.push(' ');
+                }
+                current.push_str(remaining);
+                break;
+            }
+            if current.is_empty() {
+                let split_at = remaining
+                    .char_indices()
+                    .nth(width)
+                    .map(|(i, _)| i)
+                    .unwrap_or(remaining.len());
+                let (head, tail) = remaining.split_at(split_at);
+                lines.push(head.to_string());
+                if tail.is_empty() {
+                    break;
+                }
+                remaining = tail;
+            } else {
+                lines.push(std::mem::take(&mut current));
+            }
+        }
+    }
+    if !current.is_empty() || lines.is_empty() {
+        lines.push(current);
+    }
+    lines
+}
+
 fn draw_logs_panel(f: &mut Frame, app: &App, area: Rect) {
-    let logs: Vec<ListItem> = app
+    let visible_rows = area.height.saturating_sub(2) as usize;
+    let content_width = area.width.saturating_sub(2) as usize;
+
+    // Wrap every entry to the panel's actual width so long messages read in
+    // full instead of being clipped at the border, then scroll/slice by
+    // wrapped line (not by entry) so `log_scroll` lines up with what's
+    // actually on screen.
+    let all_lines: Vec<(String, ratatui::style::Color)> = app
         .logs
         .iter()
-        .rev()
-        .take(area.height as usize - 2)
-        .map(|log| {
-            let style = if log.contains("Error") || log.contains("✗") {
-                Style::default().fg(Color::Red)
-            } else if log.contains("✓") {
-                Style::default().fg(Color::Green)
-            } else {
-                Style::default().fg(Color::Gray)
-            };
-            ListItem::new(log.as_str()).style(style)
+        .flat_map(|entry| {
+            let color = entry.level.color();
+            wrap_text(&entry.formatted(), content_width)
+                .into_iter()
+                .map(move |line| (line, color))
         })
         .collect();
+
+    let total = all_lines.len();
+    let end = total.saturating_sub(app.log_scroll.min(total));
+    let start = end.saturating_sub(visible_rows);
+
+    let logs: Vec<ListItem> = all_lines[start..end]
+        .iter()
+        .map(|(line, color)| ListItem::new(line.as_str()).style(Style::default().fg(*color)))
+        .collect();
+
+    let title = if app.log_scroll > 0 {
+        format!(
+            " Logs ({}, scrolled +{}) — [/]: scroll, l: toggle, L: clear ",
+            app.logs.len(),
+            app.log_scroll
+        )
+    } else {
+        format!(" Logs ({}) — [/]: scroll, l: toggle, L: clear ", app.logs.len())
+    };
 
     let logs_list = List::new(logs).block(
         Block::default()
             .borders(Borders::ALL)
             .border_type(ratatui::widgets::BorderType::Rounded)
-            .title(" Logs (l: toggle) "),
+            .title(title),
     );
 
     f.render_widget(logs_list, area);
@@ -272,50 +333,54 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_add_profile_screen(f: &mut Frame, app: &App) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .margin(4)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Length(3),
-            Constraint::Length(3),
-            Constraint::Length(3),
-            Constraint::Length(3),
-            Constraint::Length(3),
-            Constraint::Length(3),
-            Constraint::Length(3),
-            Constraint::Min(3),
-        ])
-        .split(f.size());
-
     let title_text = if app.screen == Screen::EditProfile {
-        "Edit VPN Profile"
+        " Edit VPN Profile "
     } else {
-        "Add New VPN Profile"
+        " Add New VPN Profile "
     };
-    let title = Paragraph::new(title_text)
-        .style(
+
+    // A single outer block with one line per field (instead of a bordered
+    // box per field) needs only ~13 rows total, so the form still renders
+    // correctly on small terminals. The previous per-field-box layout
+    // needed ~38 rows and silently produced blank, unresponsive fields
+    // once a terminal was shorter than that.
+    let outer = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .title(Span::styled(
+            title_text,
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
-        )
-        .alignment(Alignment::Center)
-        .block(Block::default().borders(Borders::ALL));
-    f.render_widget(title, chunks[0]);
+        ));
+    let inner = outer.inner(f.size());
+    f.render_widget(outer, f.size());
 
     let fields = [
         ("Profile Name", 0),
         ("Gateway Address", 1),
         ("Category (e.g. dev, uat, prod)", 2),
-        ("Certificate Path (optional)", 3),
+        ("Certificate Path / Config File (optional)", 3),
         ("Username (optional)", 4),
         ("Aliases (comma-separated)", 5),
+        ("Backend", 6),
     ];
+
+    let mut constraints: Vec<Constraint> =
+        fields.iter().map(|_| Constraint::Length(1)).collect();
+    constraints.push(Constraint::Length(1)); // blank spacer
+    constraints.push(Constraint::Length(1)); // help line
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .margin(1)
+        .constraints(constraints)
+        .split(inner);
 
     for (i, (label, field_idx)) in fields.iter().enumerate() {
         let is_selected = app.input_field == *field_idx;
         let is_edit = app.screen == Screen::EditProfile;
         let is_name_field = *field_idx == 0;
+        let is_backend_field = *field_idx == 6;
 
         let style = if is_selected {
             Style::default()
@@ -327,26 +392,35 @@ fn draw_add_profile_screen(f: &mut Frame, app: &App) {
             Style::default()
         };
 
-        let value = &app.add_profile_data[*field_idx];
-        let cursor = if is_selected { "_" } else { "" };
-        let input = if is_edit && is_name_field {
-            format!("{}: {} (static)", label, value)
+        let input = if is_backend_field {
+            let value = app.selected_backend.label();
+            if is_selected {
+                format!("{}: ◄ {} ►", label, value)
+            } else {
+                format!("{}: {}", label, value)
+            }
         } else {
-            format!("{}: {}{}", label, value, cursor)
+            let value = &app.add_profile_data[*field_idx];
+            let cursor = if is_selected { "_" } else { "" };
+            if is_edit && is_name_field {
+                format!("{}: {} (static)", label, value)
+            } else {
+                format!("{}: {}{}", label, value, cursor)
+            }
         };
 
-        let para = Paragraph::new(input)
-            .style(style)
-            .block(Block::default().borders(Borders::ALL));
+        let marker = if is_selected { "▶ " } else { "  " };
+        let para = Paragraph::new(format!("{}{}", marker, input)).style(style);
 
-        f.render_widget(para, chunks[i + 1]);
+        f.render_widget(para, rows[i]);
     }
 
-    let help =
-        Paragraph::new("Tab: next field | Shift+Tab: prev field | Enter: save | Esc: cancel")
-            .style(Style::default().fg(Color::Gray))
-            .alignment(Alignment::Center);
-    f.render_widget(help, chunks[7]);
+    let help = Paragraph::new(
+        "Tab: next | Shift+Tab: prev | \u{2190}/\u{2192}: change backend | Enter: save | Esc: cancel",
+    )
+    .style(Style::default().fg(Color::Gray))
+    .alignment(Alignment::Center);
+    f.render_widget(help, rows[fields.len() + 1]);
 }
 
 fn draw_edit_profile_screen(f: &mut Frame, app: &App) {
@@ -488,6 +562,8 @@ fn draw_help_screen(f: &mut Frame) {
                 .add_modifier(Modifier::BOLD),
         )]),
         Line::from("  l           - Toggle logs panel"),
+        Line::from("  L           - Clear logs (while panel is open)"),
+        Line::from("  [ / ]       - Scroll logs older/newer (while panel is open)"),
         Line::from("  h/F1        - Show this help"),
         Line::from(""),
         Line::from(vec![Span::styled(
@@ -632,4 +708,32 @@ fn draw_alias_modal(f: &mut Frame, app: &App) {
         .alignment(Alignment::Center)
         .style(Style::default().fg(Color::DarkGray));
     f.render_widget(help_text, help_area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::wrap_text;
+
+    #[test]
+    fn wraps_on_word_boundaries() {
+        assert_eq!(
+            wrap_text("the quick brown fox", 10),
+            vec!["the quick", "brown fox"]
+        );
+    }
+
+    #[test]
+    fn hard_breaks_a_word_longer_than_width() {
+        assert_eq!(wrap_text("abcdefghij", 4), vec!["abcd", "efgh", "ij"]);
+    }
+
+    #[test]
+    fn empty_input_yields_one_empty_line() {
+        assert_eq!(wrap_text("", 10), vec![""]);
+    }
+
+    #[test]
+    fn short_text_is_not_wrapped() {
+        assert_eq!(wrap_text("short", 80), vec!["short"]);
+    }
 }

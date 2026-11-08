@@ -1,8 +1,9 @@
+use crate::vpn::Backend;
 use anyhow::Result;
 use quick_xml::de::from_str;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -22,6 +23,11 @@ pub struct VpnProfile {
     pub aliases: Option<String>,
     pub protocol: String, // IKEv2, OpenVPN, etc.
     pub auto_connect: bool,
+    /// Which mechanism connects this profile. Defaults to `OsNative` so
+    /// profiles saved before backends existed (e.g. Azure VPN ones) keep
+    /// working exactly as before.
+    #[serde(default)]
+    pub backend: Backend,
 }
 
 fn default_category() -> String {
@@ -123,18 +129,23 @@ impl Config {
                 let path = entry.path();
                 if path.is_file() {
                     let extension = path.extension().and_then(|s| s.to_str());
-                    if extension == Some("xml")
-                        || extension == Some("ovpn")
-                        || extension == Some("azvpn")
-                    {
-                        let content = fs::read_to_string(&path)?;
-                        if let Ok(new_profiles) = Self::import_from_xml(&content) {
-                            for np in new_profiles {
-                                if !self.profiles.iter().any(|p| p.name == np.name) {
-                                    self.profiles.push(np);
-                                    imported_any = true;
-                                }
-                            }
+                    let content = fs::read_to_string(&path)?;
+                    let new_profiles = match extension {
+                        Some("xml") | Some("azvpn") => {
+                            Self::import_from_xml(&content).unwrap_or_default()
+                        }
+                        Some("ovpn") => Self::import_openvpn(&path, &content)
+                            .map(|p| vec![p])
+                            .unwrap_or_default(),
+                        Some("conf") => Self::import_wireguard(&path, &content)
+                            .map(|p| vec![p])
+                            .unwrap_or_default(),
+                        _ => Vec::new(),
+                    };
+                    for np in new_profiles {
+                        if !self.profiles.iter().any(|p| p.name == np.name) {
+                            self.profiles.push(np);
+                            imported_any = true;
                         }
                     }
                 }
@@ -162,6 +173,58 @@ impl Config {
         let contents = toml::to_string_pretty(self)?;
         fs::write(config_path, contents)?;
         Ok(())
+    }
+
+    /// Build a profile from a plain-text OpenVPN `.ovpn` config file. The
+    /// profile is named after the file and points `cert_path` at the file
+    /// itself so the OpenVPN backend can pass it straight to `--config`.
+    fn import_openvpn(path: &Path, content: &str) -> Option<VpnProfile> {
+        let host = content
+            .lines()
+            .map(str::trim)
+            .find(|l| l.starts_with("remote "))
+            .and_then(|l| l.split_whitespace().nth(1))?
+            .to_string();
+        let name = path.file_stem()?.to_string_lossy().to_string();
+
+        Some(VpnProfile {
+            name,
+            gateway_address: host,
+            category: default_category(),
+            cert_path: Some(path.to_string_lossy().to_string()),
+            username: None,
+            aliases: None,
+            protocol: "OpenVPN".to_string(),
+            auto_connect: false,
+            backend: Backend::OpenVpn,
+        })
+    }
+
+    /// Build a profile from a WireGuard `.conf` tunnel file. The profile is
+    /// named after the file (wg-quick derives the interface name the same
+    /// way), and `cert_path` points at the file for the WireGuard backend.
+    fn import_wireguard(path: &Path, content: &str) -> Option<VpnProfile> {
+        let endpoint = content
+            .lines()
+            .map(str::trim)
+            .find(|l| l.to_lowercase().starts_with("endpoint"))
+            .and_then(|l| l.split('=').nth(1))?
+            .trim()
+            .to_string();
+        let host = endpoint.rsplit_once(':').map(|(h, _)| h).unwrap_or(&endpoint);
+        let name = path.file_stem()?.to_string_lossy().to_string();
+
+        Some(VpnProfile {
+            name,
+            gateway_address: host.to_string(),
+            category: default_category(),
+            cert_path: Some(path.to_string_lossy().to_string()),
+            username: None,
+            aliases: None,
+            protocol: "WireGuard".to_string(),
+            auto_connect: false,
+            backend: Backend::WireGuard,
+        })
     }
 
     pub fn import_from_xml(xml_content: &str) -> Result<Vec<VpnProfile>> {
@@ -243,6 +306,7 @@ impl Config {
                         aliases: None,
                         protocol: protocol.unwrap_or_else(|| "IKEv2".to_string()),
                         auto_connect: false,
+                        backend: Backend::OsNative,
                     });
                 }
             }
@@ -283,6 +347,7 @@ impl Config {
                         aliases: None,
                         protocol: protocol.unwrap_or_else(|| "IKEv2".to_string()),
                         auto_connect: false,
+                        backend: Backend::OsNative,
                     });
                 }
             }
@@ -309,6 +374,7 @@ impl Config {
                 aliases: None,
                 protocol: p.protocol.unwrap_or_else(|| "IKEv2".to_string()),
                 auto_connect: false,
+                backend: Backend::OsNative,
             });
         }
 
@@ -328,8 +394,35 @@ impl Default for Config {
                 aliases: Some("example".to_string()),
                 protocol: "IKEv2".to_string(),
                 auto_connect: false,
+                backend: Backend::OsNative,
             }],
             settings: Settings::default(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_without_backend_field_defaults_to_os_native() {
+        let old_toml = r#"
+[[profiles]]
+name = "Work Azure"
+gateway_address = "vpn-gateway.azure.com"
+category = "prod"
+protocol = "IKEv2"
+auto_connect = false
+
+[settings]
+auto_reconnect = false
+reconnect_delay_seconds = 30
+status_check_interval_seconds = 5
+log_level = "info"
+"#;
+        let config: Config = toml::from_str(old_toml).expect("old config.toml must still parse");
+        assert_eq!(config.profiles.len(), 1);
+        assert_eq!(config.profiles[0].backend, Backend::OsNative);
     }
 }

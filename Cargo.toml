@@ -28,6 +28,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Command execution
 async-process = "2.1"
+async-trait = "0.1"
 
 # Configuration
 dirs = "5.0"
